@@ -1,4 +1,4 @@
-// Lists publicly shared projects from share.geolibre.app's `GET /api/projects`
+// Lists publicly shared projects from GeoLibre Share's `GET /api/projects`
 // endpoint so the Project Gallery can browse and open them. This is the read
 // counterpart to share-geolibre.ts (which uploads via `POST /api/projects`).
 //
@@ -40,7 +40,7 @@ export class GalleryError extends Error {
   }
 }
 
-/** A public project as returned by share.geolibre.app's listing endpoint. */
+/** A public project as returned by GeoLibre Share's listing endpoint. */
 export interface SharedProject {
   id: string;
   username: string;
@@ -168,7 +168,7 @@ function normalizeProject(raw: RawSharedProject, base: string): SharedProject | 
 }
 
 /**
- * Fetch a page of public projects from share.geolibre.app.
+ * Fetch a page of public projects from GeoLibre Share.
  *
  * @param options - Pagination (`limit`/`offset`), an optional host override, an
  *   abort `signal`, and an injectable `fetchImpl` for testing.

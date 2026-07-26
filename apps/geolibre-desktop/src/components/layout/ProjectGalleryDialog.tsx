@@ -88,7 +88,7 @@ function galleryErrorMessage(error: unknown, t: TFunction): string {
 }
 
 /**
- * Browse public projects shared on share.geolibre.app and open one in GeoLibre.
+ * Browse public projects shared on the configured GeoLibre Share service and open one in GeoLibre.
  *
  * The listing endpoint only paginates (no server-side search), so this loads
  * pages on demand via "Load more" and filters the already-loaded set in the
@@ -102,7 +102,9 @@ export function ProjectGalleryDialog({
   const { t } = useTranslation();
   const trimmedToken = (useDesktopSettingsStore((s) => s.desktopSettings.shareToken) ?? "").trim();
   const hasToken = trimmedToken.length > 0;
-  const [scope, setScope] = useState<GalleryScope>("featured");
+  // A self-hosted Share starts without editorial curation, so open on all
+  // public projects instead of presenting an empty Featured tab.
+  const [scope, setScope] = useState<GalleryScope>("all");
   const [projects, setProjects] = useState<SharedProject[]>([]);
   const [status, setStatus] = useState<"idle" | "loading" | "loadingMore">("idle");
   const [error, setError] = useState<string | null>(null);
@@ -117,8 +119,8 @@ export function ProjectGalleryDialog({
   const abortRef = useRef<AbortController | null>(null);
 
   // Without a token, the "My projects" scope isn't available; fall back to the
-  // featured tab.
-  const effectiveScope: GalleryScope = scope === "mine" && !hasToken ? "featured" : scope;
+  // public listing.
+  const effectiveScope: GalleryScope = scope === "mine" && !hasToken ? "all" : scope;
 
   // Explicit dialog size once the user drags the corner grip (null = the
   // default responsive size). `dialogRef` reads the live element size at the

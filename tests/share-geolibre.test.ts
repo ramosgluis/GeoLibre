@@ -74,6 +74,10 @@ describe("resolveShareBaseUrl", () => {
     );
   });
 
+  it("accepts a same-origin root-relative Share path", () => {
+    assert.equal(resolveShareBaseUrl("/share/"), "/share");
+  });
+
   it("accepts HTTP only on loopback hosts", () => {
     assert.equal(resolveShareBaseUrl("http://localhost:8787"), "http://localhost:8787");
     assert.equal(resolveShareBaseUrl("http://127.0.0.1:8787"), "http://127.0.0.1:8787");

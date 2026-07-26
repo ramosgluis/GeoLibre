@@ -7,7 +7,7 @@ requires-python = ">=3.10"
 dependencies = ["fastapi>=0.115.0", "uvicorn[standard]>=0.32.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0"]
+dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0", "httpx2>=0.1.0"]
 # Everything required to run the FULL backend test suite. Without these extras
 # the vector/raster/SQL/ML tests skip themselves (via skipif/importorskip), so a
 # `[dev]`-only install reports a misleadingly green, near-empty run. CI installs

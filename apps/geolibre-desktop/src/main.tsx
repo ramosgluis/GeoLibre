@@ -61,10 +61,10 @@ if (isTauri()) {
       // silent unhandled rejection.
       console.error("[GeoLibre] Failed to install native geocoding fetch", error);
     });
-  // Likewise route share.geolibre.app (project Share + gallery) through the
+  // Likewise route GeoLibre Share (project Share + gallery) through the
   // native HTTP client: the share server's CORS policy allows the web origin but
   // not the Tauri WebView origin, so a browser fetch fails as "Could not reach
-  // share.geolibre.app." Lazy + desktop-only so web/embedded never import the
+  // GeoLibre Share." Lazy + desktop-only so web/embedded never import the
   // Tauri HTTP plugin.
   void import("./lib/share-fetch")
     .then(({ installNativeShareFetch }) => installNativeShareFetch())

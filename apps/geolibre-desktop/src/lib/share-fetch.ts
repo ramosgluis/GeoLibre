@@ -1,4 +1,4 @@
-// The fetch used by the share.geolibre.app client: project upload
+// The fetch used by the the configured GeoLibre Share service client: project upload
 // (`share-geolibre.ts`) and the gallery reads (`share-gallery.ts`).
 //
 // Defaults to the WebView's browser `fetch`. The desktop build swaps in a
@@ -7,7 +7,7 @@
 // policy allows the web origin but not the Tauri WebView origin
 // (`tauri://localhost` / `http://tauri.localhost`), so a plain browser `fetch`
 // from the desktop app throws a `TypeError` that surfaces to the user as
-// "Could not reach share.geolibre.app." This mirrors the geocoding fix in
+// "Could not reach the configured GeoLibre Share service." This mirrors the geocoding fix in
 // `geocoding-fetch.ts`.
 
 import { resolveShareBaseUrl } from "./share-geolibre";

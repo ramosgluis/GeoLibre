@@ -30,6 +30,7 @@ from .ml import router as ml_router
 from .ml import stop_child_server
 from .postgis import router as postgis_router
 from .raster import router as raster_router
+from .share import router as share_router
 from .sql import router as sql_router
 from .vector import router as vector_router
 from .whitebox import router as whitebox_router
@@ -68,6 +69,7 @@ async def require_sidecar_token(request: Request, call_next):
         SIDECAR_TOKEN
         and request.method != "OPTIONS"
         and request.url.path not in _TOKEN_EXEMPT_PATHS
+        and not request.url.path.startswith("/share")
     ):
         provided = request.headers.get("x-geolibre-token", "")
         if not provided:
@@ -115,6 +117,7 @@ app.include_router(vector_router)
 app.include_router(postgis_router)
 app.include_router(sql_router)
 app.include_router(ml_router)
+app.include_router(share_router)
 
 
 class RunRequest(BaseModel):

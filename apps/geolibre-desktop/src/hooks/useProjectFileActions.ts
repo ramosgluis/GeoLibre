@@ -193,7 +193,7 @@ export function useProjectFileActions(mapControllerRef: MapControllerRef) {
   // rethrows on failure so the caller (the gallery dialog) can show the error
   // inline next to the card it came from.
   //
-  // When `authToken` is set (the user has a share.geolibre.app API token), the
+  // When `authToken` is set (the user has a the configured GeoLibre Share service API token), the
   // request to the share host carries it as a Bearer token so the owner's
   // unlisted and private projects load too. The token is attached only for the
   // share host (see shareAuthorizedFetch), never to third-party hosts a project
@@ -378,7 +378,7 @@ export function useProjectFileActions(mapControllerRef: MapControllerRef) {
 
   // Builds the embed-mode layers: every local vector layer carries its own
   // features so the project is self-contained (portable to another machine or
-  // share.geolibre.app). Add Vector Layer control layers get their features
+  // the configured GeoLibre Share service). Add Vector Layer control layers get their features
   // materialized into `metadata.embeddedGeoJSON`; plain GeoJSON layers already
   // hold their `geojson`. The `localFileReloadable` flag is cleared so the
   // embedded data — not a file path that may not exist elsewhere — is what

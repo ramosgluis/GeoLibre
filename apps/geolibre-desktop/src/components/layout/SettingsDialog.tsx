@@ -87,6 +87,7 @@ import { BROWSER_PANEL_ID } from "../../hooks/useRegisterBrowserPanel";
 import { useRightPanelState } from "../../hooks/useRightPanels";
 import type { ThemeMode } from "../../hooks/useThemeMode";
 import { isTauri } from "../../lib/is-tauri";
+import { resolveShareBaseUrl } from "../../lib/share-geolibre";
 import { THEME_SCHEMES, normalizeHexColor, type ThemeScheme } from "../../lib/theme-schemes";
 import { IS_STORE_BUILD, type UpdateNotificationLevel } from "../../lib/updates";
 import {
@@ -2246,7 +2247,7 @@ export function SettingsDialog({
                           tokenLink: (
                             <a
                               className="underline"
-                              href="https://share.geolibre.app/settings"
+                              href={`${resolveShareBaseUrl()}/settings`}
                               target="_blank"
                               rel="noreferrer noopener"
                             />

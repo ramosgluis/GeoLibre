@@ -34,7 +34,7 @@ export interface DesktopSettings {
   layout: DesktopLayoutSettings;
   pluginManifestUrls: string[];
   /**
-   * Personal API token for uploading projects to share.geolibre.app. Stored in
+   * Personal API token for uploading projects to the configured GeoLibre Share service. Stored in
    * the same localStorage-backed settings as everything else, so on the web
    * build it shares the exposure surface of any other localStorage entry (a
    * same-origin script could read it). This is the well-understood "PAT in local

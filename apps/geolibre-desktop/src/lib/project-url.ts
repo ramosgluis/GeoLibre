@@ -85,7 +85,7 @@ export async function fetchProjectFromUrl(
     response = await fetchImpl(projectUrl, {
       headers: { Accept: "application/json, text/plain;q=0.9, */*;q=0.8" },
       // Always revalidate. A share host may serve the project with a long
-      // freshness lifetime (share.geolibre.app sends `max-age=3600`), and a
+      // freshness lifetime (the configured GeoLibre Share service sends `max-age=3600`), and a
       // shared URL is a *mutable* document: re-sharing overwrites it in place.
       // With the default cache mode the browser answers from its own copy for
       // the rest of that window, so recipients keep loading a superseded

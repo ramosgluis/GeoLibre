@@ -1,4 +1,4 @@
-// Uploads a serialized GeoLibre project to share.geolibre.app via its
+// Uploads a serialized GeoLibre project to the configured Share service via its
 // `POST /api/projects` endpoint, authenticated with a personal API token the
 // user created on the website. Used by the Project > Share action.
 
@@ -99,6 +99,14 @@ export function resolveShareBaseUrl(
 ): string {
   if (typeof configured === "string" && configured.trim()) {
     const trimmed = configured.trim().replace(/\/+$/, "");
+    // A root-relative path keeps a self-hosted web deployment same-origin. In
+    // a browser, resolve it to an absolute URL so gallery URL normalization
+    // works too. During SSR/tests it is safe to retain the root-relative form.
+    if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+      return typeof window === "undefined"
+        ? trimmed
+        : new URL(trimmed, window.location.origin).toString().replace(/\/+$/, "");
+    }
     // Only accept HTTPS (or HTTP on loopback for local dev) so a misconfigured
     // env var can't send the Bearer token over a plaintext connection. Parse the
     // URL and match the hostname exactly: a prefix check like
@@ -134,7 +142,7 @@ export async function uploadProjectToShare(
 ): Promise<ShareUploadResult> {
   const token = options.token.trim();
   if (!token) {
-    throw new Error("Add a share.geolibre.app API token in Settings before sharing.");
+    throw new Error("Add a Share API token in Settings before sharing.");
   }
 
   const base = (options.baseUrl ?? resolveShareBaseUrl()).replace(/\/+$/, "");
@@ -170,7 +178,7 @@ export async function uploadProjectToShare(
         throw new Error("Upload timed out. Please try again.");
       }
     }
-    throw new Error("Could not reach share.geolibre.app. Check your internet connection.");
+    throw new Error("Could not reach the configured Share service.");
   }
 
   if (!response.ok) {
@@ -181,7 +189,7 @@ export async function uploadProjectToShare(
   const payload = (await response.json().catch(() => ({}))) as ShareProjectResponse;
   const project = payload.project;
   if (!project?.projectUrl || !project.rawJsonUrl) {
-    throw new Error("share.geolibre.app returned an unexpected response.");
+    throw new Error("The configured Share service returned an unexpected response.");
   }
   return {
     username: project.username ?? "",
