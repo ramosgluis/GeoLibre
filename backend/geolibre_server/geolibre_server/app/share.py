@@ -18,7 +18,10 @@ from .share_store import ShareStore, slugify
 
 router = APIRouter(prefix="/share", tags=["share"])
 SESSION_COOKIE = "geolibre_share_session"
-MAX_PROJECT_BYTES = 25 * 1024 * 1024
+# Keep a little headroom below the host proxy's 100 MiB request limit. Share
+# uploads wrap the serialized project in JSON, so the HTTP body is larger than
+# the downloaded `.geolibre.json` file itself.
+MAX_PROJECT_BYTES = 95 * 1024 * 1024
 SESSION_SECONDS = 12 * 60 * 60
 _login_attempts: dict[str, deque[float]] = defaultdict(deque)
 

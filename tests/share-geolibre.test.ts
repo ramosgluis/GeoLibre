@@ -138,6 +138,14 @@ describe("uploadProjectToShare", () => {
     );
   });
 
+  it("maps 413 to the local Share size-limit message", async () => {
+    const { fn } = fakeFetch(413, null);
+    await assert.rejects(
+      () => uploadProjectToShare({ ...baseArgs, fetchImpl: fn }),
+      /upload limit \(95 MB\)/i,
+    );
+  });
+
   it("surfaces the server error message for other failures", async () => {
     const { fn } = fakeFetch(400, { error: "Project schema is invalid." });
     await assert.rejects(

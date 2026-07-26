@@ -102,6 +102,21 @@ def test_rejects_malformed_project(share_client) -> None:
     assert "Invalid" in response.json()["error"]
 
 
+def test_rejects_request_over_configured_share_limit(
+    share_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from geolibre_server.app import share
+
+    client, _, token = share_client
+    monkeypatch.setattr(share, "MAX_PROJECT_BYTES", 8)
+    response = client.post(
+        "/share/api/projects",
+        json=project_payload(),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 413
+
+
 def test_portal_login_csrf_and_one_time_token(share_client) -> None:
     client, _, _ = share_client
     logged_in = client.post(

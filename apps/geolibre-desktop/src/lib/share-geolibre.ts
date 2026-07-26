@@ -212,6 +212,11 @@ async function uploadErrorInfo(
   if (response.status === 429) {
     return { message: "Too many uploads. Please wait a while and try again." };
   }
+  if (response.status === 413) {
+    return {
+      message: "This project exceeds the local Share upload limit (95 MB).",
+    };
+  }
   const body = (await response.json().catch(() => null)) as { error?: string } | null;
   // Cap the server-provided string so a misconfigured host or MITM on a
   // non-HTTPS share URL cannot render a wall of text in the dialog. Slice by
