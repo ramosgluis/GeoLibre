@@ -40,7 +40,9 @@ RUN npm run build
 # (duckdb, rasterio/rio-cogeo, freestiler, whitebox-workflows).
 FROM python:3.12-slim-bookworm AS runtime
 
-# TARGETARCH is provided by BuildKit (amd64 / arm64).
+# TARGETARCH is provided by BuildKit (amd64 / arm64). Some builders, including
+# OpenShip's classic Docker builder, leave it empty; the runtime image can
+# detect its native Debian architecture in that case.
 ARG TARGETARCH
 
 # libexpat1 is a runtime dependency of rasterio (pulled in by rio-cogeo) that
@@ -61,10 +63,11 @@ RUN pip install --no-cache-dir /opt/geolibre_server \
 # freestiler (PMTiles) and whitebox-workflows publish no linux/arm64 wheels, so
 # they are installed on amd64 only. On arm64 those tools report unavailable
 # while the other conversions keep working.
-RUN if [ "$TARGETARCH" = "amd64" ]; then \
+RUN runtime_arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    if [ "$runtime_arch" = "amd64" ]; then \
       pip install --no-cache-dir "freestiler>=0.1.0" "whitebox-workflows>=2.0.2"; \
     else \
-      echo "Skipping freestiler + whitebox-workflows on $TARGETARCH (no wheels)"; \
+      echo "Skipping freestiler + whitebox-workflows on $runtime_arch (no wheels)"; \
     fi
 
 # Point the sidecar at this interpreter so it skips the managed-runtime
