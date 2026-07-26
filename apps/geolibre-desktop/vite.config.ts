@@ -11,6 +11,7 @@ import { bundledPlugins } from "./vite-plugins/bundled-plugins";
 import { copyCesiumAssets } from "./vite-plugins/copy-cesium-assets";
 import { copyRtlText } from "./vite-plugins/copy-rtl-text";
 import { copyVectorOps } from "./vite-plugins/copy-vector-ops";
+import { SPA_NAVIGATION_DENYLIST } from "./vite-plugins/pwa-navigation";
 
 const GEOAGENT_BROWSER_BUNDLE = "maplibre-gl-geoagent/dist/browser-";
 const EARTH_ENGINE_CONTROL_BUNDLE = "maplibre-gl-earth-engine/dist/";
@@ -755,9 +756,9 @@ function pwaPlugin(): Plugin[] {
       clientsClaim: true,
       skipWaiting: true,
       navigateFallback: "index.html",
-      // Never SPA-fallback the sidecar proxy or any asset request; let those hit
-      // the network/precache directly.
-      navigateFallbackDenylist: [/^\/sidecar\//, /^\/__geolibre_/, /\/[^/?]+\.[^/]+$/],
+      // Never SPA-fallback server-owned namespaces or asset requests; let those
+      // hit nginx/FastAPI or the precache directly.
+      navigateFallbackDenylist: SPA_NAVIGATION_DENYLIST,
       runtimeCaching: [
         {
           // Hashed build assets under /assets/ that the precache skips: the
