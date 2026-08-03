@@ -13,6 +13,7 @@ Release builds are produced for:
 - Windows x64: unsigned desktop binary
 - macOS Apple Silicon: Developer ID signed and notarized DMG and app bundle (v1.4.1+)
 - macOS Intel: Developer ID signed and notarized DMG and app bundle (v1.4.1+)
+- Android: signed APKs, one per ABI (`geolibre-android-arm64.apk` and friends)
 
 The Windows GitHub Release build is unsigned and may require a platform-specific
 trust prompt; the [Microsoft Store](#windows-installation) build is signed and
@@ -58,8 +59,10 @@ The portable build relies on the Microsoft Edge WebView2 Runtime, which is
 preinstalled on Windows 11 and current Windows 10. If the app does not start,
 install the
 [Evergreen runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
-The optional Python sidecar tools (Whitebox, raster, conversion) need Python
-available just as in the installed build; everything else runs without it.
+The optional Python sidecar tools (raster, conversion, AI Segmentation) need
+Python available just as in the installed build; everything else — including the
+1,000+ tool Whitebox geoprocessing toolbox, which runs on WebAssembly — runs
+without it.
 
 ## macOS installation
 
@@ -109,8 +112,9 @@ by Apple, so Gatekeeper allows them to open without any extra steps:
 
 GeoLibre offers several Linux install options. The AUR, COPR, and Flatpak
 packages auto-update (through your system package manager or `flatpak update`);
-the direct `.deb`, `.rpm`, and AppImage downloads are updated by re-downloading
-the new release.
+the AppImage updates itself in place with [AppImageUpdate](#appimage-any-distribution),
+and the direct `.deb` and `.rpm` downloads are updated by re-downloading the new
+release.
 
 ### Arch Linux / Manjaro (AUR)
 
@@ -171,6 +175,58 @@ chmod +x GeoLibre.Desktop_<version>_amd64.AppImage
 AppImages need FUSE. On distros that no longer ship it by default, install
 `libfuse2` (for example `sudo apt install libfuse2`) or run with
 `--appimage-extract-and-run`.
+
+#### Delta updates
+
+Releases after v2.3.0 embed update information in the AppImage, so
+[AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate),
+[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher),
+[AppManager](https://github.com/kem-a/AppManager) and
+[AM](https://github.com/ivan-hc/AM) can update it in place. Each release also
+ships a `.zsync` file next to the AppImage, so an update transfers only the
+blocks that changed rather than the whole image:
+
+```bash
+appimageupdatetool GeoLibre.Desktop_<version>_amd64.AppImage
+```
+
+Check what an AppImage points at with
+`./GeoLibre.Desktop_<version>_amd64.AppImage --appimage-updateinfo`.
+
+## Android installation
+
+### Google Play (recommended)
+
+GeoLibre is on
+[Google Play](https://play.google.com/store/apps/details?id=org.geolibre.app) as
+a native Android app, built from the same codebase as the desktop and web builds.
+The Play build is signed and updates automatically:
+
+[Get GeoLibre on Google Play](https://play.google.com/store/apps/details?id=org.geolibre.app){ .md-button .md-button--primary }
+
+### Sideload an APK
+
+Each [release](https://github.com/opengeos/GeoLibre/releases) also attaches
+signed, per-ABI APKs. Download the one matching your device
+(`geolibre-android-arm64.apk` for nearly every modern phone), allow installs
+from unknown sources, and tap it — or install it over ADB:
+
+```bash
+adb install -r geolibre-android-arm64.apk
+```
+
+Sideloaded builds do not update themselves, so download a newer APK to upgrade.
+
+!!! note
+
+    The Play build and the sideloaded APKs are signed with different keys, so
+    Android will not upgrade one into the other. Uninstall the existing copy
+    (`adb uninstall org.geolibre.app`) before switching between them.
+
+Tools that need a local desktop process — the Raster, Conversion, and AI
+Segmentation toolboxes, and the PostgreSQL data source — are hidden on Android.
+The Whitebox geoprocessing toolbox runs on WebAssembly and stays available. See
+[Android](android.md) for the full list and for build instructions.
 
 ## Build from source
 

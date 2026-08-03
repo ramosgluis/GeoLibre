@@ -26,11 +26,15 @@ import {
 import { useTranslation } from "react-i18next";
 import { AssistantSession } from "../../lib/assistant/agent";
 import { renderAssistantMarkdown } from "../../lib/assistant/markdown";
+import { selectActiveAssistantProfile } from "../../lib/assistant/profiles";
 import { openSettingsSection } from "../layout/SettingsDialog";
 import {
   ASSISTANT_PROVIDER_IDS,
   availableProviders,
+  defaultModelFor,
+  hasManagedAssistantProxy,
   hasProviderKey,
+  PROVIDER_MODELS,
   PROVIDER_LABELS,
   type AssistantProfile,
   type AssistantProviderId,
@@ -134,6 +138,11 @@ export function AssistantPanel({ mapControllerRef }: AssistantPanelProps) {
   const sectionRef = useRef<HTMLElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Session-local prompt history. `null` means the user is editing a fresh
+  // draft; otherwise it is the recalled entry's index.
+  const promptHistoryRef = useRef<string[]>([]);
+  const promptHistoryIndexRef = useRef<number | null>(null);
+  const promptDraftRef = useRef("");
   // Guards a synchronous double-submit before `running` re-renders.
   const runningRef = useRef(false);
   // Generation that was stopped (0 = none), so a stopped run's rejection isn't
@@ -158,6 +167,7 @@ export function AssistantPanel({ mapControllerRef }: AssistantPanelProps) {
 
   // Read profiles + default from DesktopSettings (localStorage).
   const { aiProfiles, defaultAiProfileId } = useDesktopSettingsStore((s) => s.desktopSettings);
+  const setDesktopSettings = useDesktopSettingsStore((s) => s.setDesktopSettings);
 
   // Whether the user has explicitly changed the profile via the dropdown in
   // this session. When false, we always follow the default profile so that
@@ -179,22 +189,19 @@ export function AssistantPanel({ mapControllerRef }: AssistantPanelProps) {
     return storeSettings.aiProfiles.some((p) => p.id === stored) ? stored : null;
   });
 
+  const deploymentProxyConfigured = hasManagedAssistantProxy();
+
   // The currently active profile: if the user hasn't explicitly chosen one,
   // follow the default. Otherwise respect their explicit selection.
   const activeProfile: AssistantProfile | null = useMemo(() => {
-    // If the user explicitly chose a profile via the dropdown, use that.
-    if (userExplicitlyChoseProfile.current && selectedProfileId) {
-      const found = aiProfiles.find((p) => p.id === selectedProfileId);
-      if (found) return found;
-    }
-    // Fall back to the default profile.
-    if (defaultAiProfileId) {
-      const found = aiProfiles.find((p) => p.id === defaultAiProfileId);
-      if (found) return found;
-    }
-    // Fall back to the first profile.
-    return aiProfiles[0] ?? null;
-  }, [selectedProfileId, aiProfiles, defaultAiProfileId]);
+    return selectActiveAssistantProfile({
+      profiles: aiProfiles,
+      defaultProfileId: defaultAiProfileId,
+      selectedProfileId,
+      userExplicitlyChoseProfile: userExplicitlyChoseProfile.current,
+      deploymentProxyConfigured,
+    });
+  }, [selectedProfileId, aiProfiles, defaultAiProfileId, deploymentProxyConfigured]);
 
   // Queue of model-generated code snippets (run_python / run_maplibre_js)
   // awaiting the user's approval, each with the promise resolver its tool
@@ -330,6 +337,10 @@ export function AssistantPanel({ mapControllerRef }: AssistantPanelProps) {
   const send = async () => {
     const prompt = input.trim();
     if (!prompt || runningRef.current || !hasKey) return;
+    const history = promptHistoryRef.current;
+    if (history.at(-1) !== prompt) history.push(prompt);
+    promptHistoryIndexRef.current = null;
+    promptDraftRef.current = "";
     runningRef.current = true;
     const myGeneration = (sendGenerationRef.current += 1);
     setRunning(true);
@@ -421,6 +432,54 @@ export function AssistantPanel({ mapControllerRef }: AssistantPanelProps) {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       void send();
+      return;
+    }
+
+    if (
+      (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing
+    ) {
+      return;
+    }
+
+    const history = promptHistoryRef.current;
+    if (history.length === 0) return;
+
+    // The arrows still move the caret inside a draft: recall only from a
+    // collapsed caret at the very start (Up) or very end (Down). A textarea
+    // soft-wraps long text into several visual lines with no newline of its
+    // own, so counting newlines would recall while the caret is still inside
+    // the draft; the absolute edges are the only unambiguous test.
+    const { selectionStart, selectionEnd, value } = event.currentTarget;
+    if (selectionStart !== selectionEnd) return;
+    if (event.key === "ArrowUp" && selectionStart !== 0) return;
+    if (event.key === "ArrowDown" && selectionEnd !== value.length) return;
+
+    const currentIndex = promptHistoryIndexRef.current;
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (currentIndex === null) {
+        promptDraftRef.current = input;
+        promptHistoryIndexRef.current = history.length - 1;
+      } else {
+        promptHistoryIndexRef.current = Math.max(0, currentIndex - 1);
+      }
+      setInput(history[promptHistoryIndexRef.current]);
+      return;
+    }
+
+    if (currentIndex === null) return;
+    event.preventDefault();
+    if (currentIndex < history.length - 1) {
+      promptHistoryIndexRef.current = currentIndex + 1;
+      setInput(history[currentIndex + 1]);
+    } else {
+      promptHistoryIndexRef.current = null;
+      setInput(promptDraftRef.current);
     }
   };
 
@@ -428,6 +487,17 @@ export function AssistantPanel({ mapControllerRef }: AssistantPanelProps) {
     userExplicitlyChoseProfile.current = true;
     setSelectedProfileId(profileId);
     saveStored(PROFILE_STORAGE_KEY, profileId);
+  };
+
+  const onModelChange = (modelId: string) => {
+    if (!activeProfile) return;
+    const current = useDesktopSettingsStore.getState().desktopSettings;
+    setDesktopSettings({
+      ...current,
+      aiProfiles: current.aiProfiles.map((profile) =>
+        profile.id === activeProfile.id ? { ...profile, modelId } : profile,
+      ),
+    });
   };
 
   // Drag the top edge to resize the panel height. Mirrors the Python Console:
@@ -518,19 +588,39 @@ export function AssistantPanel({ mapControllerRef }: AssistantPanelProps) {
         ) : null}
         <div className="ms-auto flex items-center gap-1">
           {hasKey && aiProfiles.length > 0 ? (
-            <Select
-              aria-label={t("assistant.profile")}
-              className="h-8 w-auto max-w-[160px] text-xs"
-              value={activeProfile?.id ?? ""}
-              disabled={running}
-              onChange={(event) => onProfileChange(event.target.value)}
-            >
-              {aiProfiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}
-                </option>
-              ))}
-            </Select>
+            <>
+              <Select
+                aria-label={t("assistant.profile")}
+                className="h-8 w-auto max-w-[160px] text-xs"
+                value={activeProfile?.id ?? ""}
+                disabled={running}
+                onChange={(event) => onProfileChange(event.target.value)}
+              >
+                {deploymentProxyConfigured ? (
+                  <option value="">{t("assistant.deploymentProxy")}</option>
+                ) : null}
+                {aiProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}
+                  </option>
+                ))}
+              </Select>
+              {activeProfile && PROVIDER_MODELS[activeProfile.provider].length > 0 ? (
+                <Select
+                  aria-label={t("assistant.model")}
+                  className="h-8 w-auto max-w-[180px] text-xs"
+                  value={activeProfile.modelId || defaultModelFor(activeProfile.provider)}
+                  disabled={running}
+                  onChange={(event) => onModelChange(event.target.value)}
+                >
+                  {PROVIDER_MODELS[activeProfile.provider].map((modelId) => (
+                    <option key={modelId} value={modelId}>
+                      {modelId}
+                    </option>
+                  ))}
+                </Select>
+              ) : null}
+            </>
           ) : null}
           <Button
             variant="ghost"
@@ -667,7 +757,12 @@ export function AssistantPanel({ mapControllerRef }: AssistantPanelProps) {
           <Textarea
             ref={inputRef}
             value={input}
-            onChange={(event) => setInput(event.target.value)}
+            onChange={(event) => {
+              setInput(event.target.value);
+              if (promptHistoryIndexRef.current === null) {
+                promptDraftRef.current = event.target.value;
+              }
+            }}
             onKeyDown={onKeyDown}
             placeholder={t("assistant.placeholder")}
             spellCheck

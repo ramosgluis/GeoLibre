@@ -1,8 +1,12 @@
 import {
+  controlRendersLayer,
   DEFAULT_LAYER_STYLE,
   type GeoLibreLayer,
+  type ExternalNativePaintBridge,
   geojsonHasZCoordinates,
+  getExternalNativePaintBridge,
   type LayerStyle,
+  pluginOwnsPaint,
   proportionalRadiusExpression,
   ruleBasedVisibilityFilter,
   shouldUseTiledRendering,
@@ -10,6 +14,7 @@ import {
   validateMapExpression,
 } from "@geolibre/core";
 import { addProtocol, config } from "maplibre-gl";
+import type { GeoJSON } from "geojson";
 import type maplibregl from "maplibre-gl";
 import type { PropertyValueSpecification } from "maplibre-gl";
 import { FileSource, PMTiles, Protocol } from "pmtiles";
@@ -53,7 +58,12 @@ import {
 import { ensureGeneratedImageHandler } from "./generated-images";
 import { prepareFillPattern } from "./fill-patterns";
 import { prepareLineDecoration } from "./line-decorations";
-import { markerIconSizeValue, prepareMarker } from "./markers";
+import {
+  KML_ICON_URL_PROPERTY,
+  markerIconSizeValue,
+  prepareKmlFeatureIcons,
+  prepareMarker,
+} from "./markers";
 import { isPlaceholderLayer } from "./placeholders";
 import {
   circlePaint,
@@ -136,10 +146,12 @@ function unclusteredPointFilter(hasTextMarkers: boolean): maplibregl.FilterSpeci
 /**
  * Combine a sub-layer's geometry filter with the layer's per-feature filters:
  * the transient {@link GeoLibreLayer.timeFilter} (a Time-Slider-bound layer
- * only renders features inside the current timeline window) and the rule-based
- * visibility filter (a rule-based layer whose else rule is switched off hides
- * features matching no rule — see {@link ruleBasedVisibilityFilter}). Returns
- * the geometry filter unchanged when neither applies, so the common path
+ * only renders features inside the current timeline window), the transient
+ * {@link GeoLibreLayer.embedFilter} (the embed API's `setFilter`, set by the
+ * host page that frames the app), and the rule-based visibility filter (a
+ * rule-based layer whose else rule is switched off hides features matching no
+ * rule — see {@link ruleBasedVisibilityFilter}). Returns the geometry filter
+ * unchanged when none applies, so the common path
  * produces an identical spec and `ensureLayer` performs no filter update.
  *
  * Aggregate cluster layers (the bubble and its count) intentionally do not pass
@@ -167,8 +179,14 @@ function withFeatureFilters(
   if (Array.isArray(timeFilter) && timeFilter.length > 0) {
     filters.push(timeFilter);
   }
+  if (Array.isArray(layer.embedFilter) && layer.embedFilter.length > 0) {
+    filters.push(layer.embedFilter);
+  }
   const ruleFilter = ruleBasedVisibilityFilter(layer.style);
   if (ruleFilter) filters.push(ruleFilter);
+  if (layer.metadata?.sourceKind === "annotation") {
+    filters.push(["!=", ["get", "visible"], false]);
+  }
   if (filters.length === 0) return geometryFilter;
   return ["all", geometryFilter, ...filters] as unknown as maplibregl.FilterSpecification;
 }
@@ -215,15 +233,18 @@ function nativeLayerSupportsFilter(type: string): boolean {
 
 /**
  * The active per-feature filters GeoLibre applies on top of an external
- * layer's own filters: the transient Time-Slider window and the rule-based
- * hide-unmatched filter (see {@link ruleBasedVisibilityFilter}). Empty when
- * neither applies.
+ * layer's own filters: the transient Time-Slider window, the embed API's
+ * host-set `setFilter` expression, and the rule-based hide-unmatched filter
+ * (see {@link ruleBasedVisibilityFilter}). Empty when none applies.
  */
 function externalFeatureFilterExtras(layer: GeoLibreLayer): unknown[] {
   const extras: unknown[] = [];
   const timeFilter = layer.timeFilter;
   if (Array.isArray(timeFilter) && timeFilter.length > 0) {
     extras.push(timeFilter);
+  }
+  if (Array.isArray(layer.embedFilter) && layer.embedFilter.length > 0) {
+    extras.push(layer.embedFilter);
   }
   const ruleFilter = ruleBasedVisibilityFilter(layer.style);
   if (ruleFilter) extras.push(ruleFilter);
@@ -248,8 +269,10 @@ function combineExternalFilters(
 }
 
 /**
- * Apply (or clear) GeoLibre's per-feature filters — a Time-Slider window and
- * the rule-based hide-unmatched filter (see {@link ruleBasedVisibilityFilter})
+ * Apply (or clear) GeoLibre's per-feature filters — a Time-Slider window, the
+ * embed API's host-set `setFilter` expression, and the rule-based
+ * hide-unmatched filter (see {@link ruleBasedVisibilityFilter}, and
+ * {@link externalFeatureFilterExtras} for the set this reads)
  * — on an external-native vector layer that a control owns and paints itself
  * (e.g. the Add Vector Layer control). The control segregates geometry across
  * its own native layers with a base filter such as
@@ -260,7 +283,8 @@ function combineExternalFilters(
  *
  * @param map - The MapLibre map.
  * @param nativeLayerId - A control-owned native layer id.
- * @param layer - The store layer (reads `timeFilter` and the rule filter).
+ * @param layer - The store layer (reads `timeFilter`, `embedFilter`, and the
+ *   rule filter).
  */
 function applyExternalNativeFeatureFilters(
   map: maplibregl.Map,
@@ -305,6 +329,18 @@ function applyExternalNativeFeatureFilters(
 // range we keep applying the style range on every sync, including a later reset
 // back to the full [0, 24] window.
 const managedZoomRangeLayerIds = new Set<string>();
+const geoJsonSourceData = new WeakMap<maplibregl.GeoJSONSource, GeoJSON>();
+
+function rememberGeoJsonData(map: maplibregl.Map, sourceId: string, data: GeoJSON): void {
+  const source = map.getSource(sourceId);
+  if (source?.type === "geojson") geoJsonSourceData.set(source as maplibregl.GeoJSONSource, data);
+}
+
+function setGeoJsonData(source: maplibregl.GeoJSONSource, data: GeoJSON): void {
+  if (geoJsonSourceData.get(source) === data) return;
+  source.setData(data);
+  geoJsonSourceData.set(source, data);
+}
 
 function clampLayerZoom(value: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback;
@@ -418,13 +454,39 @@ function syncExternalNativeLayer(
     ensurePMTilesExternalLayer(map, layer, nativeLayerIds, beforeId);
   }
 
+  // A plugin-painted layer (a MapLibre CustomLayerInterface) has no paint
+  // properties to set, so the panel's opacity/visibility only reach it through
+  // the setters the registration supplied. Forward them before the branches
+  // below, which cover the native visibility/zoom/order work the custom layer
+  // still honors.
+  applyExternalNativePaintBridge(layer);
+
   // Custom render layers (e.g. 3D Tiles) manage their own visibility, opacity,
   // and zoom behavior through the control that registered them, so the standard
   // visibility/paint/zoom-range sync below must be skipped — only ordering is
   // handled here.
   if (isExternalCustomLayer(layer)) {
+    // Controls whose native fills are ordinary vector polygons (e.g. Overture
+    // Maps buildings) opt into GeoLibre-owned 3D extrusion. The Style panel
+    // offers the 3D mode to these layers, so without this the toggle would
+    // silently no-op on the ordering-only path below.
+    if (
+      supportsNativeFillExtrusion(layer) &&
+      syncExternalNativeExtrusion(map, layer, nativeLayerIds, beforeId)
+    ) {
+      return;
+    }
+    clearExternalNativeExtrusion(map, layer, nativeLayerIds);
+
     for (const nativeLayerId of nativeLayerIds) {
       moveLayer(map, nativeLayerId, beforeId);
+      // The owning control mirrors direct per-layer visibility changes from
+      // the store, but effective state such as a hidden parent group never
+      // mutates the child's stored `visible` flag. Apply the effective value
+      // to ordinary native MapLibre layers here so group visibility reaches
+      // control-rendered vectors too. MapLibre custom layers also accept the
+      // standard layout visibility property.
+      setNativeLayerVisibility(map, nativeLayerId, layer.visible ? "visible" : "none");
       // Control-painted vector layers (e.g. Add Vector Layer's circle/fill/line
       // layers) still honor a Time Slider window and the rule-based
       // hide-unmatched filter: filtering is independent of the paint the
@@ -475,50 +537,14 @@ function syncExternalNativeLayer(
 
   ensureExternalGeoJsonNativeLayer(map, layer, nativeLayerIds, beforeId);
 
-  const nativeFillLayerSpecs = nativeLayerIds
-    .map((nativeLayerId) => getStyleLayerSpec(map, nativeLayerId))
-    .filter(isFillStyleLayerSpec);
-
-  if (layer.style.extrusionEnabled && nativeFillLayerSpecs.length > 0 && !controlOwnsPaint(layer)) {
-    for (const nativeLayerId of nativeLayerIds) {
-      setNativeLayerVisibility(map, nativeLayerId, "none");
-    }
-
-    for (const fillLayerSpec of nativeFillLayerSpecs) {
-      const extrusionLayerId = externalExtrusionLayerId(fillLayerSpec.id);
-      // The synthetic extrusion layer must honor the same per-feature filters
-      // (Time Slider window, rule-based hide-unmatched) as the fill it
-      // replaces. The copied fill filter may still carry a previously pushed
-      // combined filter, so prefer the tracked base — the fill's own filter —
-      // and re-apply the current extras on top so they never compound or go
-      // stale.
-      const tracked = nativeFilterStatesFor(map).get(fillLayerSpec.id);
-      const baseFilter = tracked
-        ? tracked.base
-        : ((fillLayerSpec.filter as maplibregl.FilterSpecification) ?? null);
-      const filter = combineExternalFilters(baseFilter, externalFeatureFilterExtras(layer));
-      ensureLayer(
-        map,
-        extrusionLayerId,
-        {
-          id: extrusionLayerId,
-          type: "fill-extrusion",
-          source: fillLayerSpec.source,
-          "source-layer": fillLayerSpec["source-layer"],
-          filter: filter ?? undefined,
-          ...intersectZoomRange(fillLayerSpec, layer.style),
-          paint: fillExtrusionPaint(layer.style, layer.opacity),
-          layout: { visibility: layer.visible ? "visible" : "none" },
-        },
-        beforeId,
-      );
-    }
+  if (
+    !controlOwnsPaint(layer) &&
+    syncExternalNativeExtrusion(map, layer, nativeLayerIds, beforeId)
+  ) {
     return;
   }
 
-  for (const nativeLayerId of nativeLayerIds) {
-    removeIfExists(map, externalExtrusionLayerId(nativeLayerId));
-  }
+  clearExternalNativeExtrusion(map, layer, nativeLayerIds);
 
   for (const nativeLayerId of nativeLayerIds) {
     const nativeLayer = map.getLayer(nativeLayerId);
@@ -585,8 +611,9 @@ function ensureExternalGeoJsonNativeLayer(
       type: "geojson",
       data: layer.geojson,
     });
+    rememberGeoJsonData(map, nativeSourceId, layer.geojson);
   } else {
-    (map.getSource(nativeSourceId) as maplibregl.GeoJSONSource).setData(layer.geojson);
+    setGeoJsonData(map.getSource(nativeSourceId) as maplibregl.GeoJSONSource, layer.geojson);
   }
 
   if (nativeLayerIds.every((id) => map.getLayer(id))) return;
@@ -688,8 +715,21 @@ function isPMTilesExternalLayer(layer: GeoLibreLayer): boolean {
   );
 }
 
+// Delegates to core's `controlRendersLayer` so the flag this dispatch branches
+// on has exactly one definition: the Layer Library's "can this be re-added and
+// rendered?" gate reads the same predicate (issue #1520), and a change to what
+// marks a custom-render layer cannot leave the two disagreeing.
 function isExternalCustomLayer(layer: GeoLibreLayer): boolean {
-  return typeof layer.metadata.customLayerType === "string";
+  return controlRendersLayer(layer);
+}
+
+// Opt-in for control-managed layers (`customLayerType`, the ordering-only path)
+// whose native fill layers are plain vector polygons GeoLibre can re-render as
+// fill-extrusions. Controls that implement extrusion themselves — Add Vector
+// Layer and DuckDB push `extrusionEnabled` into their own control style — must
+// leave this unset, or both would extrude the same features.
+function supportsNativeFillExtrusion(layer: GeoLibreLayer): boolean {
+  return layer.metadata.nativeFillExtrusion === true;
 }
 
 // External controls that paint their native layers with data-driven MapLibre
@@ -700,7 +740,39 @@ function isExternalCustomLayer(layer: GeoLibreLayer): boolean {
 // drops the layer onto an ordering-only path, these layers still respond to the
 // panel's show/hide and reorder controls.
 function controlOwnsPaint(layer: GeoLibreLayer): boolean {
-  return layer.metadata.controlOwnsPaint === true;
+  return layer.metadata.controlOwnsPaint === true || pluginOwnsPaint(layer);
+}
+
+// Last opacity/visibility handed to a layer's paint bridge, so a sync pass that
+// changed nothing (a reorder, a basemap swap) does not call the plugin's setters
+// again — each call typically triggers a WebGL repaint. Keyed by bridge identity
+// as well as layer id: a re-registration (project reload, unregister →
+// register) installs a new bridge whose renderer has never been told the current
+// values, so it must get a fresh apply even when the store values did not move.
+const appliedBridgeState = new Map<
+  string,
+  { bridge: ExternalNativePaintBridge; opacity: number; visible: boolean }
+>();
+
+// Forward the panel's generic controls to a plugin-painted layer's own API. The
+// setters are optional, so a plugin can bridge opacity only (the common case:
+// visibility already works, MapLibre honors it on a custom layer).
+function applyExternalNativePaintBridge(layer: GeoLibreLayer): void {
+  const bridge = getExternalNativePaintBridge(layer.id);
+  if (!bridge) {
+    appliedBridgeState.delete(layer.id);
+    return;
+  }
+
+  const applied = appliedBridgeState.get(layer.id);
+  const sameBridge = applied?.bridge === bridge;
+  if (!sameBridge || applied.opacity !== layer.opacity) {
+    bridge.setOpacity?.(layer.opacity);
+  }
+  if (!sameBridge || applied.visible !== layer.visible) {
+    bridge.setVisibility?.(layer.visible);
+  }
+  appliedBridgeState.set(layer.id, { bridge, opacity: layer.opacity, visible: layer.visible });
 }
 
 function ensurePMTilesExternalLayer(
@@ -1380,6 +1452,10 @@ function setNativeLayerVisibility(
   visibility: "visible" | "none",
 ): void {
   try {
+    const canRead = typeof map.getLayoutProperty === "function";
+    const current = canRead ? map.getLayoutProperty(nativeLayerId, "visibility") : undefined;
+    if (current === visibility || (canRead && current === undefined && visibility === "visible"))
+      return;
     map.setLayoutProperty(nativeLayerId, "visibility", visibility);
   } catch {
     // Custom layers from external controls may not accept layout updates.
@@ -1401,6 +1477,111 @@ function isFillStyleLayerSpec(
 
 export function externalExtrusionLayerId(nativeLayerId: string): string {
   return `${nativeLayerId}-geolibre-extrusion`;
+}
+
+// Native layers hidden to make room for a synthetic fill-extrusion layer.
+// Tracked so switching 3D extrusion back off can restore them on the
+// control-managed path, which otherwise never writes visibility (the control
+// owns it) and would leave the layer invisible. Keyed per map (like
+// `nativeFilterStatesFor`) because native layer ids are only unique within one
+// map: two live maps showing the same control would otherwise share entries,
+// and one clearing extrusion would strand the other's fill hidden.
+const extrusionHiddenNativeLayerIdsByMap = new WeakMap<maplibregl.Map, Set<string>>();
+
+function extrusionHiddenNativeLayerIdsFor(map: maplibregl.Map): Set<string> {
+  let ids = extrusionHiddenNativeLayerIdsByMap.get(map);
+  if (!ids) {
+    ids = new Set();
+    extrusionHiddenNativeLayerIdsByMap.set(map, ids);
+  }
+  return ids;
+}
+
+/**
+ * Render an external control's native `fill` layers as GeoLibre-owned
+ * `fill-extrusion` layers built from the same source and source layer.
+ *
+ * The natives are hidden rather than restyled, so the control keeps owning
+ * them and a later toggle back to 2D restores its rendering untouched.
+ *
+ * @param map: The MapLibre map to reconcile against.
+ * @param layer: The store layer whose style drives the extrusion paint.
+ * @param nativeLayerIds: Native layer ids registered by the control.
+ * @param beforeId: Layer id the extrusion layers are inserted before.
+ * @returns True when extrusion layers were applied, false when the layer is
+ *     not extruded or exposes no native fill layer to extrude.
+ */
+function syncExternalNativeExtrusion(
+  map: maplibregl.Map,
+  layer: GeoLibreLayer,
+  nativeLayerIds: string[],
+  beforeId?: string,
+): boolean {
+  if (!layer.style.extrusionEnabled) return false;
+
+  const nativeFillLayerSpecs = nativeLayerIds
+    .map((nativeLayerId) => getStyleLayerSpec(map, nativeLayerId))
+    .filter(isFillStyleLayerSpec);
+  if (nativeFillLayerSpecs.length === 0) return false;
+
+  const hiddenNativeLayerIds = extrusionHiddenNativeLayerIdsFor(map);
+  for (const nativeLayerId of nativeLayerIds) {
+    setNativeLayerVisibility(map, nativeLayerId, "none");
+    hiddenNativeLayerIds.add(nativeLayerId);
+  }
+
+  for (const fillLayerSpec of nativeFillLayerSpecs) {
+    const extrusionLayerId = externalExtrusionLayerId(fillLayerSpec.id);
+    // The synthetic extrusion layer must honor the same per-feature filters
+    // (Time Slider window, rule-based hide-unmatched) as the fill it
+    // replaces. The copied fill filter may still carry a previously pushed
+    // combined filter, so prefer the tracked base — the fill's own filter —
+    // and re-apply the current extras on top so they never compound or go
+    // stale.
+    const tracked = nativeFilterStatesFor(map).get(fillLayerSpec.id);
+    const baseFilter = tracked
+      ? tracked.base
+      : ((fillLayerSpec.filter as maplibregl.FilterSpecification) ?? null);
+    const filter = combineExternalFilters(baseFilter, externalFeatureFilterExtras(layer));
+    ensureLayer(
+      map,
+      extrusionLayerId,
+      {
+        id: extrusionLayerId,
+        type: "fill-extrusion",
+        source: fillLayerSpec.source,
+        "source-layer": fillLayerSpec["source-layer"],
+        filter: filter ?? undefined,
+        ...intersectZoomRange(fillLayerSpec, layer.style),
+        paint: fillExtrusionPaint(layer.style, layer.opacity),
+        layout: { visibility: layer.visible ? "visible" : "none" },
+      },
+      beforeId,
+    );
+  }
+  return true;
+}
+
+/**
+ * Drop the synthetic extrusion layers for `nativeLayerIds` and un-hide any
+ * native layer {@link syncExternalNativeExtrusion} hid for them.
+ *
+ * @param map: The MapLibre map to reconcile against.
+ * @param layer: The store layer, read for its current visibility.
+ * @param nativeLayerIds: Native layer ids registered by the control.
+ */
+function clearExternalNativeExtrusion(
+  map: maplibregl.Map,
+  layer: GeoLibreLayer,
+  nativeLayerIds: string[],
+): void {
+  const hiddenNativeLayerIds = extrusionHiddenNativeLayerIdsFor(map);
+  for (const nativeLayerId of nativeLayerIds) {
+    removeIfExists(map, externalExtrusionLayerId(nativeLayerId));
+    if (hiddenNativeLayerIds.delete(nativeLayerId)) {
+      setNativeLayerVisibility(map, nativeLayerId, layer.visible ? "visible" : "none");
+    }
+  }
 }
 
 /**
@@ -1503,7 +1684,9 @@ function syncVectorControlPointSymbology(
   // of the other rule-based paint overrides apply to control-owned layers.
   const radius = proportionalRadiusExpression(layer.style);
   if (radius) {
-    map.setPaintProperty(circleNativeId, "circle-radius", radius);
+    if (!styleValuesEqual(map.getPaintProperty?.(circleNativeId, "circle-radius"), radius)) {
+      map.setPaintProperty(circleNativeId, "circle-radius", radius);
+    }
     overriddenRadiusIdsFor(map).add(circleNativeId);
   } else {
     restoreOverriddenCircleRadius(map, circleNativeId, layer);
@@ -1558,7 +1741,9 @@ function setExternalNativeLayerPaint(
 
   for (const [property, value] of Object.entries(paint)) {
     try {
-      map.setPaintProperty(nativeLayerId, property, value);
+      if (!styleValuesEqual(map.getPaintProperty?.(nativeLayerId, property), value)) {
+        map.setPaintProperty(nativeLayerId, property, value);
+      }
     } catch {
       // External controls can create heterogeneous style layers. Ignore paint
       // properties that do not apply to a specific native layer type.
@@ -1644,8 +1829,9 @@ function syncGeoJsonLayer(map: maplibregl.Map, layer: GeoLibreLayer, beforeId?: 
             ...(attribution ? { attribution } : {}),
           },
     );
+    rememberGeoJsonData(map, src, layer.geojson!);
   } else {
-    (map.getSource(src) as maplibregl.GeoJSONSource).setData(layer.geojson!);
+    setGeoJsonData(map.getSource(src) as maplibregl.GeoJSONSource, layer.geojson!);
   }
 
   applyVectorDataRenderLayers(map, layer, src, profile, renderer, beforeId);
@@ -1727,6 +1913,7 @@ function applyVectorDataRenderLayers(
   ensureGeneratedImageHandler(map);
   const fillPatternId = prepareFillPattern(layer.style);
   const markerImageId = prepareMarker(layer.style);
+  const kmlIconImage = prepareKmlFeatureIcons(layer.geojson!, markerImageId ?? "");
   // Derived companion symbology (inverted mask, geometry generator, dedup
   // labels) is built from the raw features, so no MapLibre filter applies to
   // it. While a Time Slider window or a rule-based visibility filter is
@@ -1734,6 +1921,7 @@ function applyVectorDataRenderLayers(
   // them for the duration, mirroring the dedup-label behavior.
   const hasFeatureFilter =
     (Array.isArray(layer.timeFilter) && layer.timeFilter.length > 0) ||
+    (Array.isArray(layer.embedFilter) && layer.embedFilter.length > 0) ||
     ruleBasedVisibilityFilter(layer.style) !== null;
 
   if (profile.hasPolygon) {
@@ -2017,7 +2205,7 @@ function applyVectorDataRenderLayers(
       layer,
       hasTextMarkers ? nonTextMarkerPointFilter : pointGeometryFilter,
     );
-    if (markerImageId) {
+    if (markerImageId || kmlIconImage) {
       removeIfExists(map, circleLayerId(layer.id));
       ensureLayer(
         map,
@@ -2029,10 +2217,12 @@ function applyVectorDataRenderLayers(
           ...styleLayerZoomRange(layer.style),
           filter: pointFilter,
           layout: {
-            "icon-image": markerImageId,
+            "icon-image": (kmlIconImage ?? markerImageId) as string,
             // The sprite is baked at its display size, so icon-size stays 1
             // unless proportional sizing scales it per feature.
-            "icon-size": markerIconSizeValue(layer.style) as PropertyValueSpecification<number>,
+            "icon-size": (kmlIconImage
+              ? ["case", ["has", KML_ICON_URL_PROPERTY], 1, markerIconSizeValue(layer.style)]
+              : markerIconSizeValue(layer.style)) as PropertyValueSpecification<number>,
             "icon-allow-overlap": true,
             "icon-ignore-placement": true,
             visibility,
@@ -2041,6 +2231,27 @@ function applyVectorDataRenderLayers(
         },
         beforeId,
       );
+      if (kmlIconImage && !markerImageId) {
+        // Features without a KML icon still use the ordinary circle renderer.
+        ensureLayer(
+          map,
+          circleLayerId(layer.id),
+          {
+            id: circleLayerId(layer.id),
+            type: "circle",
+            ...sourceSpec,
+            ...styleLayerZoomRange(layer.style),
+            filter: withFeatureFilters(layer, [
+              "all",
+              hasTextMarkers ? nonTextMarkerPointFilter : pointGeometryFilter,
+              ["!", ["has", KML_ICON_URL_PROPERTY]],
+            ] as maplibregl.FilterSpecification),
+            paint: circlePaint(layer.style, opacity),
+            layout: { visibility },
+          },
+          beforeId,
+        );
+      }
     } else {
       removeIfExists(map, markerLayerId(layer.id));
       ensureLayer(
@@ -3215,12 +3426,16 @@ function ensureLayer(
   if (map.getLayer(id)) {
     if (spec.paint) {
       for (const [key, value] of Object.entries(spec.paint)) {
-        map.setPaintProperty(id, key, value);
+        if (!styleValuesEqual(map.getPaintProperty?.(id, key), value)) {
+          map.setPaintProperty(id, key, value);
+        }
       }
     }
     if (spec.layout) {
       for (const [key, value] of Object.entries(spec.layout)) {
-        map.setLayoutProperty(id, key, value);
+        if (!styleValuesEqual(map.getLayoutProperty?.(id, key), value)) {
+          map.setLayoutProperty(id, key, value);
+        }
       }
     }
     if ("filter" in spec) {
@@ -3260,7 +3475,22 @@ function ensureLayer(
           ...(strippedLayout ? { layout: strippedLayout } : {}),
         }
       : spec;
+  // An explicit `filter: undefined` key fails MapLibre's add-time validation
+  // ("array expected, undefined found") and the layer is dropped without
+  // throwing — only an `error` event reports it. Callers that compute an
+  // optional filter still need the key present on the update branch above, so
+  // it is dropped here, on first add, where "no filter" must mean "absent".
+  const hasUndefinedFilter = "filter" in addSpec && addSpec.filter === undefined;
+  if (hasUndefinedFilter) {
+    const { filter: _filter, ...withoutFilter } = addSpec;
+    map.addLayer(withoutFilter as typeof addSpec, validBeforeId);
+    return;
+  }
   map.addLayer(addSpec, validBeforeId);
+}
+
+export function styleValuesEqual(current: unknown, next: unknown): boolean {
+  return Object.is(current, next) || JSON.stringify(current) === JSON.stringify(next);
 }
 
 function setLayerZoomRange(
@@ -3359,6 +3589,9 @@ export function removeLayerFromMap(
   layerId: string,
   layer?: GeoLibreLayer,
 ): void {
+  // Drop cached paint-bridge state so a later layer reusing this id never
+  // skips a fresh opacity/visibility apply against a new bridge.
+  appliedBridgeState.delete(layerId);
   for (const id of [
     ...getExternalNativeLayerIds(layer),
     ...getExternalNativeLayerIds(layer).map(externalExtrusionLayerId),

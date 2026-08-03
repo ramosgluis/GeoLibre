@@ -28,23 +28,97 @@ import geolibre
 
 m = geolibre.connect()          # or geolibre.Map()
 m.fly_to(-122.4, 37.8, zoom=11) # animate the live map in the left pane
-m.add_geojson(gdf, name="My layer")   # GeoDataFrame, dict, or JSON string
+layer_id = m.add_geojson(
+    gdf,
+    name="My layer",
+    fillColor="#facc15",
+    strokeColor="#d97706",
+)  # GeoDataFrame, dict, or JSON string; returns an id on desktop
+m.get_layer(layer_id)
+m.list_layers()
 m.fit_bounds([-123, 37, -122, 38])
 m.set_basemap("https://…/style.json")
-m.set_visibility(layer_id, False)
-m.remove_layer(layer_id)
 ```
 
-Calls are **fire-and-forget**: each posts a command to the host app over the
-shared scripting protocol (the same `createScriptingHandlers` surface used by the
-in-app Python console and the Jupyter widget) and returns immediately, so the
-client behaves identically on the in-browser kernel and a real server. The
-app-side endpoint is `useNotebookBridge` in
-`apps/geolibre-desktop/src/hooks/`. Canonical client source:
+Most mutation calls are **fire-and-forget**. On desktop, `add_geojson` uses the
+relay's correlated request/reply path and returns the new layer id. The same
+path exposes `list_layers()`, which returns one dict per live layer with `id`,
+`name`, `type`, `visible`, and `opacity`, and `get_layer(layer_id)`, which
+returns one matching layer or raises `ValueError`. The id can be passed directly to
+`set_visibility`, `set_opacity`, `set_style`, `remove_layer`, or
+`zoom_to_layer`.
+
+These three are also the only commands that do **not** fan out: a correlated
+request/reply can have exactly one authoritative responder, so `add_geojson`,
+`list_layers`, and `get_layer` run in a single app window (the one that
+connected first) and consistently keep using it, which is what makes an id
+returned by `add_geojson` resolvable by a later `get_layer`. Every
+fire-and-forget command — including `add_marker`/`add_markers` — still reaches
+every connected window. This is only visible if you attach two GeoLibre windows
+to one Jupyter server.
+
+`add_geojson` returns `None` instead of an id in two situations, and never
+fails outright in either:
+
+- **Nothing received the command** (no window connected, or the relay itself
+  unreachable). It behaves like every other mutation — the layer goes out over
+  the display transport with a `GeoLibreNotConnectedWarning`.
+- **A window took it but did not answer within 5s**, which a large
+  `FeatureCollection` can do. You get a `GeoLibreTimeoutWarning`; the layer is
+  still being added, so it is deliberately *not* re-sent (that would add it
+  twice) — find it with `list_layers()`.
+
+The read-back calls have nothing to return in either situation, so they raise
+`GeoLibreNotConnectedError` / `GeoLibreTimeoutError` (both `RuntimeError`)
+instead.
+
+Synchronous read-back is desktop-only. JupyterLite uses browser `postMessage`;
+blocking its Python call would also block the browser event loop that must
+deliver the result. Canonical client source:
 `backend/geolibre_server/notebook_client.py`.
 
-> Read-back queries (e.g. `get_center`) are not exposed by this fire-and-forget
-> client; they need the blocking request/reply path the `geolibre` widget uses.
+## Driving the map from an external client (VS Code, …)
+
+The desktop app's JupyterLab server is a normal, token-authenticated Jupyter
+server, so you can attach any Jupyter client to it and keep your own editor —
+and the map commands above still work. Open the Notebook panel once (that is
+what starts the server), then use its **link button** in the panel header to copy
+the connection URL and paste it into your client (in VS Code: *Jupyter: Specify
+Jupyter Server for Connections* → *Existing*).
+
+This works because commands travel over a **relay** on the Jupyter server rather
+than depending on how the notebook is being *displayed*:
+
+- `backend/geolibre_server/geolibre_server/jupyter_relay.py` is a Jupyter Server
+  extension (enabled from `jupyter_server_config.py`) exposing
+  `POST …/geolibre/relay/command`, a `…/geolibre/relay/socket` WebSocket, and
+  `GET …/geolibre/relay/status`. At load it publishes `GEOLIBRE_RELAY_URL` and
+  `GEOLIBRE_RELAY_TOKEN` into the server's environment, which **kernels inherit**
+  — that is how `import geolibre` finds the map with no configuration.
+- The app subscribes to that socket for its whole lifetime
+  (`useJupyterRelay`), reconnecting with backoff, and runs each command against
+  the same `createScriptingHandlers` surface.
+- `useNotebookBridge` remains the postMessage path for the **embedded** panel and
+  for web (JupyterLite), where the notebook page really is the app's iframe.
+
+The POST answers with how many app windows received the command, so a
+disconnected session is reported instead of silently doing nothing:
+
+```python
+geolibre.is_connected()   # False -> no GeoLibre window is listening
+```
+
+When a command cannot be delivered the client raises a
+`GeoLibreNotConnectedWarning` pointing at your own line. Promote it to an error
+with:
+
+```python
+import warnings, geolibre
+warnings.simplefilter("error", geolibre.GeoLibreNotConnectedWarning)
+```
+
+Only the desktop server has the relay: on web (JupyterLite) there is no server to
+attach an external client to.
 
 ## Theme
 
@@ -99,3 +173,7 @@ precache (see `pwaPlugin` in `apps/geolibre-desktop/vite.config.ts`).
   `Content-Security-Policy: frame-ancestors` to the Tauri webview / loopback
   origins so the app can embed the server; the Tauri CSP (`tauri.conf.json`)
   adds the loopback origins to `frame-src`/`child-src`.
+- Map-command relay: the same config enables the `geolibre_server.jupyter_relay`
+  server extension (see above). Its WebSocket accepts only the app's own origins
+  and every endpoint requires the server's per-launch token, so a command can
+  only come from something that already has kernel-execution rights there.

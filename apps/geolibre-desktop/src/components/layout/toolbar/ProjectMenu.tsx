@@ -13,7 +13,10 @@ import {
 } from "@geolibre/ui";
 import {
   BookOpen,
+  Bookmark,
+  Copy,
   FileCode2,
+  FileInput,
   FilePen,
   FilePlus2,
   FileText,
@@ -21,6 +24,7 @@ import {
   FolderOpen,
   HardDriveDownload,
   History,
+  Import,
   LayoutGrid,
   Link2,
   Printer,
@@ -41,9 +45,14 @@ interface ProjectMenuProps {
   onOpenFromFile: () => void;
   onOpenFromUrl: () => void;
   onOpenGallery: () => void;
+  onImportQgisProject: () => void;
+  onImportArcgisProject: () => void;
   onOpenRecent: (path: string) => void;
+  onOpenHistory: () => void;
   onSave: () => void;
   onSaveAs: () => void;
+  onDuplicate?: () => void;
+  onSaveAsTemplate?: () => void;
   onShare: () => void;
   onExportHtml: () => void;
   onCollaborate: () => void;
@@ -59,9 +68,14 @@ export function ProjectMenu({
   onOpenFromFile,
   onOpenFromUrl,
   onOpenGallery,
+  onImportQgisProject,
+  onImportArcgisProject,
   onOpenRecent,
+  onOpenHistory,
   onSave,
   onSaveAs,
+  onDuplicate,
+  onSaveAsTemplate,
   onShare,
   onExportHtml,
   onCollaborate,
@@ -81,6 +95,8 @@ export function ProjectMenu({
   const showSaveGroup =
     show("project.save") ||
     show("project.saveAs") ||
+    show("project.duplicate") ||
+    show("project.saveAsTemplate") ||
     show("project.share") ||
     show("project.exportHtml") ||
     (collaborationEnabled && show("project.collaborate"));
@@ -191,6 +207,30 @@ export function ProjectMenu({
             </DropdownMenuSubContent>
           </DropdownMenuSub>
         )}
+        {show("project.history") && (
+          <DropdownMenuItem onSelect={onOpenHistory}>
+            <History className="me-2 h-3.5 w-3.5" />
+            {t("toolbar.item.projectHistoryEllipsis")}
+          </DropdownMenuItem>
+        )}
+        {show("project.import") && (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <Import className="h-3.5 w-3.5" />
+              {t("toolbar.menu.import")}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              <DropdownMenuItem onSelect={onImportQgisProject}>
+                <FileInput className="me-2 h-3.5 w-3.5" />
+                {t("toolbar.item.importQgisProjectEllipsis")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onImportArcgisProject}>
+                <FileInput className="me-2 h-3.5 w-3.5" />
+                {t("toolbar.item.importArcgisProjectEllipsis")}
+              </DropdownMenuItem>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        )}
         {showSaveGroup && <DropdownMenuSeparator />}
         {show("project.save") && (
           <DropdownMenuItem onSelect={onSave}>
@@ -202,6 +242,18 @@ export function ProjectMenu({
           <DropdownMenuItem onSelect={onSaveAs}>
             <FilePen className="me-2 h-3.5 w-3.5" />
             {t("toolbar.item.saveAsEllipsis")}
+          </DropdownMenuItem>
+        )}
+        {show("project.duplicate") && onDuplicate && (
+          <DropdownMenuItem onSelect={onDuplicate}>
+            <Copy className="me-2 h-3.5 w-3.5" />
+            {t("toolbar.item.duplicate")}
+          </DropdownMenuItem>
+        )}
+        {show("project.saveAsTemplate") && onSaveAsTemplate && (
+          <DropdownMenuItem onSelect={onSaveAsTemplate}>
+            <Bookmark className="me-2 h-3.5 w-3.5" />
+            {t("toolbar.item.saveAsTemplateEllipsis")}
           </DropdownMenuItem>
         )}
         {show("project.share") && (

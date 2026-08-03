@@ -28,11 +28,16 @@ ARG VITE_GEOLIBRE_SHARE_URL=/share
 # Set to 1 (or true) to disable the first-launch welcome wizard for the whole
 # deployment; visitors land straight on the map.
 ARG VITE_WELCOME_DISABLED=
+# Comma-separated origins allowed to drive a framed app over the embed
+# postMessage API. Usually set at RUN time instead (-e GEOLIBRE_EMBED_ORIGINS=…),
+# which the entrypoint writes into the runtime config without a rebuild.
+ARG VITE_GEOLIBRE_EMBED_ORIGINS=
 ENV GEOLIBRE_APP_BASE=${GEOLIBRE_APP_BASE}
 ENV VITE_GEE_OAUTH_CLIENT_ID=${VITE_GEE_OAUTH_CLIENT_ID}
 ENV VITE_MAPILLARY_ACCESS_TOKEN=${VITE_MAPILLARY_ACCESS_TOKEN}
 ENV VITE_GEOLIBRE_SHARE_URL=${VITE_GEOLIBRE_SHARE_URL}
 ENV VITE_WELCOME_DISABLED=${VITE_WELCOME_DISABLED}
+ENV VITE_GEOLIBRE_EMBED_ORIGINS=${VITE_GEOLIBRE_EMBED_ORIGINS}
 
 RUN npm run build
 
@@ -83,6 +88,12 @@ ENV GEOLIBRE_CONVERSION_PYTHON=/usr/local/bin/python \
     GEOLIBRE_CONVERSION_ROOTS=/data
 RUN mkdir -p /data
 
+# For the same reason, the sidecar's PostGIS endpoints refuse every destination
+# until GEOLIBRE_POSTGIS_HOSTS names the allowed databases (comma-separated
+# `host` or `host:port`) — otherwise a same-origin caller could aim them at
+# hosts only this container can reach. Deliberately left unset: set it at
+# `docker run` time to enable PostGIS, or `*` to accept any connection string.
+
 # WARNING: docker/nginx.conf's CSP allows http://localhost:* / http://127.0.0.1:*
 # (and ws:// equivalents) in connect-src for local-dev data sources (PMTiles/COGs
 # from a dev server on another port). This image is intended for local/single-user
@@ -97,7 +108,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh \
   # Default auth snippet (disabled). entrypoint.sh rewrites it at start based
   # on GEOLIBRE_AUTH_USER/GEOLIBRE_AUTH_PASSWORD; baking a valid default keeps
   # `nginx -t` and non-entrypoint invocations working.
-  && printf '# Basic Auth disabled (GEOLIBRE_AUTH_USER/GEOLIBRE_AUTH_PASSWORD not set).\n' > /etc/nginx/geolibre-auth.conf
+  && printf '# Basic Auth disabled (GEOLIBRE_AUTH_USER/GEOLIBRE_AUTH_PASSWORD not set).\n' > /etc/nginx/geolibre-auth.conf \
+  && printf '# AI proxy disabled (GEOLIBRE_AI_URL not set).\n' > /etc/nginx/geolibre-ai-proxy.conf
 COPY --from=build /app/apps/geolibre-desktop/dist /usr/share/nginx/html
 
 EXPOSE 80

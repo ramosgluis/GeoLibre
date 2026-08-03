@@ -31,15 +31,20 @@ import {
   highlightLineLayerId,
   highlightSourceId,
   lineLayerId,
+  markerLayerId,
   sourceId,
 } from "./geojson-loader";
 import {
   mbtilesStyleLayerIds,
   removeLayerFromMap,
+  styleValuesEqual,
   syncLayer,
   vectorTileStyleLayerIds,
 } from "./layer-sync";
+import { globeSafeMaxZoom } from "./globe-fit-bounds";
+import { ensureGeneratedImageHandler } from "./generated-images";
 import { installGlobePopupOcclusion } from "./globe-popup-occlusion";
+import { isMapboxStyleUrl, loadMapboxStyle, redactMapboxStyleUrl } from "./mapbox-style";
 import { PlanetaryScaleControl } from "./planetary-scale-control";
 import { getOfflineBasemapStyle, isOfflineBasemapSentinel } from "./protomaps-basemap";
 import { ResetBearingControl } from "./reset-bearing-control";
@@ -50,6 +55,8 @@ const DEFAULT_PROJECTION: maplibregl.ProjectionSpecification = {
   type: "globe",
 };
 const DEFAULT_MAX_PITCH = 85;
+/** Edge margin, in CSS pixels, kept free when fitting the camera to an extent. */
+const FIT_BOUNDS_PADDING = 40;
 const BLANK_BACKGROUND_LAYER_ID = "geolibre-blank-background";
 const BLANK_BACKGROUND_COLOR = "#ffffff";
 const LAYER_CONTROL_EXCLUDED_LAYERS = [
@@ -380,6 +387,12 @@ export class MapController {
   // (reentrancy guard against a sync loop). See syncLayerControlState.
   private refreshingStyleEditor = false;
   private basemapStyleUrl = DEFAULT_BASEMAP;
+  // Bumped on every style application so an asynchronously resolved style (the
+  // Mapbox path in applyStyleToMap) can tell whether it is still the current one.
+  private styleGeneration = 0;
+  // Aborts the in-flight Mapbox descriptor request, so a superseded basemap
+  // change (or destroy) does not leave the fetch running.
+  private pendingMapboxStyleAbort: AbortController | null = null;
   private basemapVisible = true;
   private basemapOpacity = 1;
   private mapPreferences: MapPreferences = DEFAULT_PROJECT_PREFERENCES.map;
@@ -422,9 +435,14 @@ export class MapController {
     const maxPitch = clampNumber(mapPreferences.maxPitch, 0, DEFAULT_MAX_PITCH);
     this.mapPreferences = mapPreferences;
     this.basemapStyleUrl = options.styleUrl ?? DEFAULT_BASEMAP;
+    // A Mapbox descriptor has to be fetched and rewritten before MapLibre will
+    // take it (see applyStyleToMap), which the Map constructor cannot wait for.
+    // Start blank and apply it below, as soon as the listeners are wired — the
+    // path a project saved with a Mapbox basemap and a split-view pane both take.
+    const deferMapboxStyle = isMapboxStyleUrl(this.basemapStyleUrl);
     this.map = new maplibregl.Map({
       container,
-      style: resolveMapStyle(this.basemapStyleUrl),
+      style: deferMapboxStyle ? createBlankMapStyle() : resolveMapStyle(this.basemapStyleUrl),
       center: view?.center ?? [-100, 40],
       zoom: view?.zoom ?? 2,
       bearing: view?.bearing ?? 0,
@@ -443,6 +461,7 @@ export class MapController {
       // Trade-off: adds one extra framebuffer copy per frame on tiled renderers.
       canvasContextAttributes: { preserveDrawingBuffer: true },
     });
+    ensureGeneratedImageHandler(this.map);
     installGlobePopupOcclusion(maplibregl);
     // The constructor options above already apply the static constraints.
     // The transform constraint is installed by the MapCanvas effect that
@@ -496,6 +515,10 @@ export class MapController {
     this.addAttributionControl();
     this.addLogoControl();
     this.addMaptoolkitLogoControl();
+    // Kick off the deferred Mapbox descriptor fetch now that `style.load` and
+    // `styledata` are wired, so the real style is treated exactly like a later
+    // basemap switch rather than racing the listeners above.
+    if (deferMapboxStyle) this.applyStyleToMap(this.basemapStyleUrl);
     return this.map;
   }
 
@@ -863,6 +886,7 @@ export class MapController {
       clearTimeout(this.layerControlStyleRefreshTimer);
       this.layerControlStyleRefreshTimer = null;
     }
+    this.abortPendingMapboxStyle();
     this.map?.remove();
     this.map = null;
     this.styleReady = false;
@@ -872,14 +896,97 @@ export class MapController {
   setStyle(url: string): void {
     if (!this.map) return;
     this.basemapStyleUrl = url;
-    this.styleReady = false;
-    this.basemapOriginalPaintValues.clear();
-    this.removeLayerControl();
-    this.map.setStyle(resolveMapStyle(url));
+    this.applyStyleToMap(url);
     // Switching to/from a planetary basemap changes the active body (the store's
     // ellipsoid subscription runs first, so the singleton is already current),
     // so redraw the scale bar for the new radius without waiting for a pan.
     this.scaleControl?.refresh();
+  }
+
+  /**
+   * Tears down the state that belongs to the outgoing style, immediately before
+   * the incoming one is handed to MapLibre. `style.load` rebuilds all of it.
+   *
+   * Deliberately called per style application rather than at the top of
+   * `setStyle`: the Mapbox path below only reaches `map.setStyle` after an
+   * asynchronous fetch, and tearing down first would leave the controller
+   * wedged if that fetch failed — `styleReady` stuck false with no `style.load`
+   * coming to clear it, so layer syncing, basemap visibility/opacity and the
+   * layer control would all stay disabled over a still-rendered old style.
+   */
+  private beginStyleSwap(): void {
+    this.styleReady = false;
+    this.basemapOriginalPaintValues.clear();
+    this.removeLayerControl();
+  }
+
+  /**
+   * Hands a basemap style URL to MapLibre.
+   *
+   * Everything except Mapbox resolves synchronously, so `setStyle` is handed the
+   * URL (or the inline style a GeoLibre sentinel expands to) directly. Mapbox
+   * style descriptors are Mapbox-flavored and must be fetched and rewritten
+   * before MapLibre will accept them (see ./mapbox-style), which makes that path
+   * asynchronous: a generation counter drops the result of a swap the user has
+   * already superseded, so a slow descriptor can never overwrite a newer
+   * basemap. Validation is off for those, matching how the basemap control
+   * applies them — the descriptor is transformed to spec, not authored here.
+   */
+  private applyStyleToMap(url: string): void {
+    const map = this.map;
+    if (!map) return;
+    const generation = ++this.styleGeneration;
+    // Drop any descriptor still in flight for the basemap this one replaces:
+    // its result is already destined for the generation check below, so the
+    // request is pure waste. Also covers a request that never settles, which
+    // would otherwise keep its closure (and this controller) alive.
+    this.abortPendingMapboxStyle();
+
+    if (!isMapboxStyleUrl(url)) {
+      this.beginStyleSwap();
+      map.setStyle(resolveMapStyle(url));
+      return;
+    }
+
+    const pending = new AbortController();
+    this.pendingMapboxStyleAbort = pending;
+    void loadMapboxStyle(url, pending.signal)
+      .then((style) => {
+        if (this.map !== map || this.styleGeneration !== generation) return;
+        this.beginStyleSwap();
+        map.setStyle(style, { validate: false });
+      })
+      .catch((error: unknown) => {
+        if (this.map !== map || this.styleGeneration !== generation) return;
+        // Nothing was torn down (beginStyleSwap runs only on success), so the
+        // controller stays fully live over the style it already had — better
+        // than blanking the map. The basemap control watches its own parallel
+        // setStyle and rolls the basemap back through the store when a provider
+        // style fails, which arrives here as a newer generation.
+        // The URL carries the user's access_token, so log the descriptor id only.
+        console.warn(
+          `Failed to load the Mapbox basemap style "${redactMapboxStyleUrl(url)}".`,
+          error,
+        );
+      })
+      .finally(() => {
+        if (this.pendingMapboxStyleAbort === pending) {
+          this.pendingMapboxStyleAbort = null;
+        }
+      });
+  }
+
+  /**
+   * Cancels an in-flight Mapbox descriptor request, if any.
+   *
+   * An abort rejects the fetch with an `AbortError`, but that rejection always
+   * lands on a superseded generation (this is only called after bumping it, or
+   * from `destroy`, which nulls the map), so the handlers above return before
+   * reaching the warning — no aborted request is ever reported as a failure.
+   */
+  private abortPendingMapboxStyle(): void {
+    this.pendingMapboxStyleAbort?.abort();
+    this.pendingMapboxStyleAbort = null;
   }
 
   setBasemapVisible(visible: boolean): void {
@@ -969,18 +1076,27 @@ export class MapController {
     const map = this.map;
 
     const nextIds = layers.map((l) => l.id);
+    const nextIdSet = new Set(nextIds);
+    const previousLayers = new Map(this.syncedLayers.map((layer) => [layer.id, layer]));
     for (const id of this.layerIds) {
-      if (!nextIds.includes(id)) {
-        removeLayerFromMap(
-          map,
-          id,
-          this.syncedLayers.find((layer) => layer.id === id),
-        );
+      if (!nextIdSet.has(id)) {
+        removeLayerFromMap(map, id, previousLayers.get(id));
       }
     }
 
-    for (const [index, layer] of layers.entries()) {
-      syncLayer(map, layer, this.getBeforeStyleLayerId(layers, index));
+    // Top-down (`layers` is bottom-to-top, so the last entry is the topmost).
+    // Each layer is placed *beneath* the first style layer belonging to a layer
+    // above it, so every anchor must already sit where this pass wants it.
+    // Walking bottom-up would anchor a layer to a neighbour that has not been
+    // moved yet, which mis-stacks the whole map for one pass whenever a layer's
+    // native style layers appear out of band. An Add Vector Layer restore does
+    // exactly that: its control adds the layers on top of the style once the
+    // data has loaded, long after the first sync pass ran. A later sync would
+    // converge, but a map-only embed (`?maponly`) has no panels to trigger one,
+    // so the wrong stack is what the viewer keeps looking at. See
+    // opengeos/GeoLibre#1404.
+    for (let index = layers.length - 1; index >= 0; index -= 1) {
+      syncLayer(map, layers[index], this.getBeforeStyleLayerId(layers, index));
     }
     this.layerIds = nextIds;
     this.syncedLayers = layers;
@@ -992,9 +1108,17 @@ export class MapController {
   }
 
   private styleLoadHandler: (() => void) | null = null;
+  private styleReloadHandler: (() => void) | null = null;
 
   waitAndSyncLayers(layers: GeoLibreLayer[]): void {
     if (!this.map) return;
+
+    if (!this.styleReloadHandler) {
+      this.styleReloadHandler = () => {
+        if (!this.styleLoadHandler) this.syncLayers(this.syncedLayers);
+      };
+      this.map.on("style.load", this.styleReloadHandler);
+    }
 
     if (this.styleLoadHandler) {
       this.map.off("style.load", this.styleLoadHandler);
@@ -1003,6 +1127,9 @@ export class MapController {
 
     const run = () => {
       if (this.styleLoadHandler !== run) return;
+      this.map?.off("load", run);
+      this.map?.off("style.load", run);
+      this.styleLoadHandler = null;
       this.syncLayers(layers);
     };
     this.styleLoadHandler = run;
@@ -1011,17 +1138,21 @@ export class MapController {
       run();
     } else {
       this.map.once("load", run);
+      this.map.once("style.load", run);
     }
-    this.map.on("style.load", run);
   }
 
   private applyBasemapVisibility(): void {
     if (!this.isStyleReady() || !this.map) return;
     const map = this.map;
+    const visibility = this.basemapVisible ? "visible" : "none";
 
     for (const layer of this.getBasemapStyleLayers()) {
       try {
-        map.setLayoutProperty(layer.id, "visibility", this.basemapVisible ? "visible" : "none");
+        const current = map.getLayoutProperty(layer.id, "visibility");
+        if (current !== visibility && !(current === undefined && visibility === "visible")) {
+          map.setLayoutProperty(layer.id, "visibility", visibility);
+        }
       } catch {
         // Some third-party custom style layers may not expose layout properties.
       }
@@ -1077,6 +1208,8 @@ export class MapController {
           ? original * this.basemapOpacity
           : this.basemapOpacity;
     try {
+      const current = this.map.getPaintProperty(layerId, property);
+      if (styleValuesEqual(current, opacity)) return;
       this.map.setPaintProperty(layerId, property, opacity);
     } catch {
       // Some third-party custom style layers may not expose paint properties.
@@ -1115,14 +1248,26 @@ export class MapController {
       [bounds[0], bounds[1]],
       [bounds[2], bounds[3]],
     ];
+    // `fitBounds` is built on `cameraForBounds`, so the camera the branches
+    // below read back carries the same globe over-zoom on a hemisphere-wide
+    // extent. Apply the ceiling to it too, or a world-scale layer is compared
+    // (and flown to) at a zoom the map would never actually settle on.
+    const fitCeiling = globeSafeMaxZoom(bounds, this.getViewportSize(), FIT_BOUNDS_PADDING);
+    const cappedZoom = (zoom: number): number =>
+      fitCeiling === null ? zoom : Math.min(zoom, fitCeiling);
+
     // Tile layers only carry data from their source `minzoom` up (e.g. an OGC
     // API vector tileset served only at z17). Fitting the whole extent would
     // land far below that zoom and render nothing, so when the fit is too far
     // out, fly to the extent center at the layer's minimum render zoom instead.
     const minRenderZoom = this.getLayerMinRenderZoom(layer);
     if (minRenderZoom !== null) {
-      const camera = this.map.cameraForBounds(box, { padding: 40 });
-      if (camera?.center && typeof camera.zoom === "number" && camera.zoom < minRenderZoom) {
+      const camera = this.map.cameraForBounds(box, { padding: FIT_BOUNDS_PADDING });
+      if (
+        camera?.center &&
+        typeof camera.zoom === "number" &&
+        cappedZoom(camera.zoom) < minRenderZoom
+      ) {
         this.map.flyTo({
           center: camera.center,
           zoom: minRenderZoom,
@@ -1137,18 +1282,18 @@ export class MapController {
     // reads as a 3D object on load, pulling back slightly so its vertical extent
     // fits. The user can flatten the pitch afterward.
     if (layer.metadata.customLayerType === "scenegraph") {
-      const camera = this.map.cameraForBounds(box, { padding: 40 });
+      const camera = this.map.cameraForBounds(box, { padding: FIT_BOUNDS_PADDING });
       if (camera?.center && typeof camera.zoom === "number") {
         this.map.flyTo({
           center: camera.center,
-          zoom: Math.max(camera.zoom - 0.75, 0),
+          zoom: Math.max(cappedZoom(camera.zoom) - 0.75, 0),
           pitch: 60,
           duration: 800,
         });
         return;
       }
     }
-    this.map.fitBounds(box, { padding: 40, duration: 800 });
+    this.fitBounds(bounds);
   }
 
   /** The layer's minimum render zoom (its tile source `minzoom`), if advertised
@@ -1160,6 +1305,18 @@ export class MapController {
       }
     }
     return null;
+  }
+
+  /**
+   * The map viewport in CSS pixels, or null when the canvas has not been laid
+   * out yet (a fresh or detached container reports zero) and any size-derived
+   * calculation would be nonsense.
+   */
+  private getViewportSize(): { width: number; height: number } | null {
+    const canvas = typeof this.map?.getCanvas === "function" ? this.map.getCanvas() : undefined;
+    const width = canvas?.clientWidth ?? 0;
+    const height = canvas?.clientHeight ?? 0;
+    return width > 0 && height > 0 ? { width, height } : null;
   }
 
   fitBounds(bounds: [number, number, number, number]): void {
@@ -1174,12 +1331,21 @@ export class MapController {
       });
       return;
     }
+    // An extent wider than the hemisphere a globe can show has no camera that
+    // contains it, and MapLibre's globe fit answers one of those by zooming *in*,
+    // leaving the data behind the horizon. Cap those at the flat-map zoom so they
+    // settle on a whole-globe view instead; narrower fits are untouched.
+    const maxZoom = globeSafeMaxZoom(bounds, this.getViewportSize(), FIT_BOUNDS_PADDING);
     this.map.fitBounds(
       [
         [bounds[0], bounds[1]],
         [bounds[2], bounds[3]],
       ],
-      { padding: 40, duration: 800 },
+      {
+        padding: FIT_BOUNDS_PADDING,
+        duration: 800,
+        ...(maxZoom === null ? {} : { maxZoom }),
+      },
     );
   }
 
@@ -1558,7 +1724,7 @@ export class MapController {
   }
 
   private addTerrainSource(): boolean {
-    if (!this.map || !this.controlVisibility.terrain || !this.isStyleReady()) {
+    if (!this.map || !this.isStyleReady()) {
       return false;
     }
     if (this.map.getSource(TERRAIN_SOURCE_ID)) return true;
@@ -2003,9 +2169,17 @@ export class MapController {
   }> {
     const nativeLayerIds = layer.metadata.nativeLayerIds;
     if (Array.isArray(nativeLayerIds) && nativeLayerIds.length > 0) {
-      return nativeLayerIds
+      const candidates = nativeLayerIds
         .filter((id): id is string => typeof id === "string")
         .map((id) => ({ id, suffix: nativeLayerSuffix(id) }));
+      // KML/KMZ icons loaded through the Vector Layer control render in a
+      // GeoLibre-owned companion symbol layer, not one of the control's native
+      // layer ids. Include it here so Background visibility/opacity does not
+      // mistake the icons for basemap symbols.
+      if (layer.metadata.sourceKind === "maplibre-gl-vector") {
+        candidates.push({ id: markerLayerId(layer.id), suffix: "Markers" });
+      }
+      return candidates;
     }
 
     if (layer.type === "geojson") {
@@ -2014,6 +2188,7 @@ export class MapController {
         { id: fillLayerId(layer.id), suffix: "Polygons" },
         { id: lineLayerId(layer.id), suffix: "Lines" },
         { id: circleLayerId(layer.id), suffix: "Points" },
+        { id: markerLayerId(layer.id), suffix: "Markers" },
       ];
     }
 
@@ -2292,6 +2467,42 @@ export class MapController {
     } else {
       this.terrainEnablePending = true;
     }
+  }
+
+  /** Whether GeoLibre's built-in 3D terrain is currently active. */
+  isTerrainEnabled(): boolean {
+    return this.map?.getTerrain()?.source === TERRAIN_SOURCE_ID;
+  }
+
+  /**
+   * Enable or disable GeoLibre's built-in 3D terrain independently of whether
+   * its map button is visible. Plugins such as Flight Simulator use this to
+   * guarantee relief while active without changing the user's control layout.
+   */
+  setTerrainEnabled(enabled: boolean): boolean {
+    if (!this.map) return false;
+    if (enabled) {
+      if (!this.addTerrainSource()) return false;
+      if (this.terrainControl) {
+        this.terrainControl.setEnabled(true);
+      } else if (!this.isTerrainEnabled()) {
+        this.map.setCenterClampedToGround(false);
+        this.map.setTerrain({
+          source: TERRAIN_SOURCE_ID,
+          exaggeration: this.terrainExaggeration,
+        });
+      }
+      return this.isTerrainEnabled();
+    }
+    if (this.isTerrainEnabled()) {
+      if (this.terrainControl) {
+        this.terrainControl.setEnabled(false);
+      } else {
+        this.map.setTerrain(null);
+        this.map.setCenterClampedToGround(true);
+      }
+    }
+    return !this.isTerrainEnabled();
   }
 
   private removeTerrainControl(): void {

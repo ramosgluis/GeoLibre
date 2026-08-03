@@ -11,6 +11,7 @@ import {
   useAppStore,
 } from "@geolibre/core";
 import type { Layer } from "@deck.gl/core";
+import type { Map as MapLibreMap } from "maplibre-gl";
 import {
   DEFAULT_TILESET_URL,
   ThreeDTilesControl,
@@ -33,6 +34,13 @@ import {
   restoreArcgisI3sTilesLayers,
   THREE_D_TILES_DECK_LOAD_OPTIONS,
 } from "./arcgis-i3s-tiles";
+
+/**
+ * `metadata.sourceKind` marking the 3D Tiles layers this plugin adds. Exported so the Layer Library's restore
+ * dispatch keys off the same value this plugin writes rather than a hand-typed
+ * copy (issue #1520).
+ */
+export const THREE_D_TILES_SOURCE_KIND = "3d-tiles-url";
 
 const threeDTilesControlPosition: GeoLibreMapControlPosition = "top-left";
 const THREE_D_TILES_LAYER_ID = "geolibre-3d-tiles";
@@ -86,6 +94,7 @@ let threeDTilesStoreUnsubscribe: (() => void) | null = null;
 let threeDTilesStoreSyncSuspended = 0;
 let threeDTilesRuntimeEnvUnsubscribe: (() => void) | null = null;
 let activeThreeDTilesApp: GeoLibreAppAPI | null = null;
+const pendingThreeDTilesStyleRestores = new WeakSet<MapLibreMap>();
 
 // The Google tiles render through the shared interleaved deck overlay
 // (./shared-deck-overlay.ts) under the "google-3d-tiles" source, so they coexist
@@ -150,6 +159,11 @@ export function restoreThreeDTilesLayers(app: GeoLibreAppAPI): void {
   const layers = useAppStore.getState().layers.filter(isThreeDTilesControlLayer);
   if (layers.length === 0) return;
 
+  const map = app.getMap?.();
+  if (map && deferThreeDTilesRestoreUntilMapIdle(map, () => restoreThreeDTilesLayers(app))) {
+    return;
+  }
+
   const control = runWithThreeDTilesStoreSyncSuspended(() => ensureThreeDTilesControl(app));
   if (!control) return;
 
@@ -169,6 +183,35 @@ export function restoreThreeDTilesLayers(app: GeoLibreAppAPI): void {
   } catch (error) {
     console.error("[GeoLibre] Failed to restore 3D Tiles layers", error);
   }
+}
+
+/**
+ * Queue one restore after an in-progress MapLibre style load becomes idle.
+ *
+ * Project restoration can run while the saved basemap is still replacing the
+ * initial style. MapLibre accepts a custom layer during that window, then
+ * discards it when the new style finishes loading. This mirrors the upstream
+ * control's style-ready guard. The `idle` event is used because the host's
+ * initial `load` callback can run after `style.load` while `isStyleLoaded()`
+ * remains false. Repeated restore passes are deduplicated.
+ *
+ * @param map - The MapLibre map receiving the restored custom layer.
+ * @param restore - Replays the current project state after the map becomes idle.
+ * @returns True when restoration was deferred, otherwise false.
+ */
+export function deferThreeDTilesRestoreUntilMapIdle(
+  map: MapLibreMap,
+  restore: () => void,
+): boolean {
+  if (map.isStyleLoaded()) return false;
+  if (pendingThreeDTilesStyleRestores.has(map)) return true;
+
+  pendingThreeDTilesStyleRestores.add(map);
+  map.once("idle", () => {
+    pendingThreeDTilesStyleRestores.delete(map);
+    restore();
+  });
+  return true;
 }
 
 function openStandaloneThreeDTilesControl(app: GeoLibreAppAPI): boolean {
@@ -481,7 +524,7 @@ function createThreeDTilesStoreLayer(
       nativeLayerIds: [tileset.layerId],
       panelCollapsed,
       sourceId: tileset.id,
-      sourceKind: "3d-tiles-url",
+      sourceKind: THREE_D_TILES_SOURCE_KIND,
       status: tileset.status,
     },
     sourcePath: tileset.tilesetUrl,
@@ -539,7 +582,7 @@ function resetThreeDTilesControl(control: ThreeDTilesControl | null): void {
 function isThreeDTilesControlLayer(layer: GeoLibreLayer): boolean {
   return (
     layer.type === "3d-tiles" &&
-    layer.metadata.sourceKind === "3d-tiles-url" &&
+    layer.metadata.sourceKind === THREE_D_TILES_SOURCE_KIND &&
     layer.metadata.externalNativeLayer === true &&
     !isGooglePhotorealisticTilesetLayerUrl(layer)
   );

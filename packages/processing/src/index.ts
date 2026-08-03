@@ -175,7 +175,9 @@ export {
   whiteboxWasmAvailable,
   listWhiteboxWasmTools,
   listWasmToolManifests,
+  manifestScalarDefaults,
   mergeWasmToolManifests,
+  type ToolManifest,
   outputBaseName,
   fileOutputTargetExtension,
   outputTextFormatHint,
@@ -214,7 +216,13 @@ export {
   type PmtilesExtractResult,
   type PmtilesSourceInfo,
 } from "./pmtiles-extract";
-export { detectObjects, type Detection, type DetectionOptions } from "./object-detection";
+export {
+  detectObjects,
+  rasterFromRgba,
+  readDetectionImage,
+  type Detection,
+  type DetectionOptions,
+} from "./object-detection";
 export {
   segmentEverything,
   type SegmentMask,

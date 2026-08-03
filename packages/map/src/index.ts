@@ -54,6 +54,14 @@ export {
   type ProtomapsBasemapStyleOptions,
 } from "./protomaps-basemap";
 export {
+  isMapboxStyleUrl,
+  loadMapboxStyle,
+  mapboxAccessTokenFromStyleUrl,
+  redactMapboxStyleUrl,
+  resolveMapboxInternalUrl,
+  transformMapboxStyle,
+} from "./mapbox-style";
+export {
   ensureRemotePMTilesArchive,
   hasPMTilesArchive,
   pmtilesNativeLayerIds,

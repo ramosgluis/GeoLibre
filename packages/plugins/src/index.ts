@@ -12,6 +12,7 @@ export {
   getActiveRightPanelDock,
   RIGHT_PANEL_DOCKS,
   isRightPanelCollapsed,
+  isRightPanelVisible,
   getRightPanel,
   listRightPanels,
   getRightPanelSnapshot,
@@ -92,6 +93,7 @@ export {
   openHtmlPanel,
   openLegendPanel,
   openLegendPanelWithItems,
+  LIDAR_SOURCE_KIND,
   openLidarLayerPanel,
   restoreLidarLayers,
   openMeasurePanel,
@@ -106,6 +108,13 @@ export {
   openZarrLayerPanel,
   addCloudNetcdfLayer,
   type CloudNetcdfLayerOptions,
+  addZarrRasterLayer,
+  queryZarrLayer,
+  setZarrLayerSelector,
+  setZarrLocalStoreProvider,
+  type ZarrRasterLayerOptions,
+  type ZarrReadableStore,
+  type ZarrTimeAttributesReader,
   setBookmarkLabels,
   setViewStateLabels,
   subscribeBookmarkPanel,
@@ -129,6 +138,14 @@ export {
   type KerchunkVariable,
 } from "./plugins/kerchunk-reference-store";
 export {
+  ZarrDirectoryStore,
+  createDirectoryZarrMetadataReader,
+  localZarrStoreUrl,
+  normalizeZarrKey,
+  type ZarrDirectoryReader,
+  type ZarrMetadataReader,
+} from "./plugins/zarr-directory-store";
+export {
   openLocalNetcdf,
   buildInlineZarrRefs,
   type LocalNetcdfFile,
@@ -148,8 +165,14 @@ export {
   type DuckDBIdentifyResult,
 } from "./plugins/maplibre-duckdb";
 export {
+  queryOvertureFeatures,
+  overtureFeatureMatchesFilter,
+  overtureTilesForBBox,
+} from "./plugins/overture-query";
+export {
   closePlanetaryComputerPanel,
   openPlanetaryComputerPanel,
+  PLANETARY_COMPUTER_SOURCE_KIND,
   restorePlanetaryComputerLayers,
 } from "./plugins/maplibre-planetary-computer";
 export {
@@ -160,19 +183,31 @@ export {
   toggleEarthEnginePanel,
 } from "./plugins/maplibre-earth-engine";
 export {
+  EARTH_ENGINE_UNAVAILABLE_MESSAGE,
+  isEarthEngineAvailable,
+} from "./plugins/earth-engine-auth";
+export {
   closeThreeDTilesLayerPanel,
   openThreeDTilesLayerPanel,
   restoreThreeDTilesLayers,
+  THREE_D_TILES_SOURCE_KIND,
 } from "./plugins/maplibre-3d-tiles";
+export { isRecoverableNonTiledRasterError } from "./plugins/non-tiled-raster-error";
 export {
   addRasterToMap,
+  prepareRasterControl,
   applyRasterLayerOrder,
   closeRasterLayerPanel,
   openRasterLayerPanel,
   restoreRasterLayers,
+  setLocalRasterFileReader,
+  setLocalRasterPicker,
   setNonTiledRasterHandler,
   setRasterPixelInspect,
+  type LocalRasterFileReader,
+  type LocalRasterPicker,
   type NonTiledRasterRequest,
+  type PickedLocalRaster,
 } from "./plugins/maplibre-raster";
 export {
   RASTER_MAX_CLASSES,
@@ -199,14 +234,24 @@ export { colormapColors, warmColormapColors } from "./plugins/colormap-colors";
 export { setTerrainMeasureLabels } from "./plugins/terrain-measure";
 export {
   closeVectorLayerPanel,
+  getVectorLayerPropertyValues,
   materializeEmbeddableVectorLayers,
   openVectorLayerPanel,
   reloadVectorControlLayer,
   restoreVectorLayers,
+  setKmlFileImportHandler,
+  isKmlFileSelection,
+  routeKmlFileSelection,
+  type KmlFileImport,
+  type KmlFileImportHandler,
 } from "./plugins/maplibre-vector";
-// The raster-layer-sync and vector-layer-sync internals are not
-// re-exported: the app drives the panels through the functions above, and
-// the tests import the sync helpers from the module paths directly.
+// The rest of the raster-layer-sync / vector-layer-sync internals stay
+// unexported: the app drives the panels through the functions above, and the
+// tests import the sync helpers from the module paths directly. These two are
+// the exception — the Layer Library (issue #1520) has to recognize a
+// control-painted vector layer to read its features before saving it, and to
+// route a re-add back to restoreVectorLayers.
+export { isEmbeddableLocalVectorLayer, VECTOR_SOURCE_KIND } from "./plugins/vector-layer-sync";
 export {
   clearDirectionsWaypoints,
   type DirectionsRouteLegMetric,
@@ -293,8 +338,10 @@ export {
   DECK_VIZ_SOURCE_KIND,
   isDeckVizLayer,
 } from "./plugins/deckgl-viz/store-layer";
+export { VIEWER_BLOCKED_PLUGIN_IDS } from "./viewer-plugins";
 export {
   maplibreAnnotationsPlugin,
+  ANNOTATIONS_PLUGIN_ID,
   ANNOTATIONS_SOURCE_KIND,
   setAnnotationLabels,
   type AnnotationLabels,
@@ -328,9 +375,27 @@ export {
   type ViewImportExport,
   type ViewImportChangeCounts,
 } from "./plugins/geo-editor-view-import";
-export { maplibreGeoAgentPlugin } from "./plugins/maplibre-geoagent";
+export { maplibreGeoAgentPlugin, GEOAGENT_PLUGIN_ID } from "./plugins/maplibre-geoagent";
 export { maplibreUsgsLidarPlugin } from "./plugins/maplibre-usgs-lidar";
 export { maplibreNasaEarthdataPlugin } from "./plugins/maplibre-nasa-earthdata";
+export {
+  DEFAULT_EARTHDATA_GIS_LABELS,
+  EARTHDATA_GIS_PLUGIN_ID,
+  maplibreEarthdataGisPlugin,
+  setEarthdataCogSaver,
+  setEarthdataGisLabels,
+  type EarthdataCogSaver,
+  type EarthdataGisLabels,
+} from "./plugins/maplibre-earthdata-gis";
+// The catalog client's helpers (buildSearchUrl, parseSearchResponse, …) are
+// deliberately not re-exported here: those names are already taken by the
+// OpenAerialMap client below. Import them from the module path instead.
+export {
+  EARTHDATA_GIS_PORTAL_URL,
+  type EarthdataGisItem,
+  type EarthdataGisSearchResult,
+  type EarthdataServiceKind,
+} from "./plugins/earthdata-gis-api";
 export {
   DEFAULT_OPENAERIALMAP_LABELS,
   maplibreOpenAerialMapPlugin,
@@ -338,6 +403,27 @@ export {
   setOpenAerialMapLabels,
   type OpenAerialMapLabels,
 } from "./plugins/maplibre-openaerialmap";
+export {
+  ARCGIS_HUB_PLUGIN_ID,
+  DEFAULT_ARCGIS_HUB_LABELS,
+  maplibreArcGisHubPlugin,
+  setArcGisHubLabels,
+  type ArcGisHubLabels,
+} from "./plugins/maplibre-arcgis-hub";
+export {
+  ARCGIS_HUB_PAGE_URL,
+  ARCGIS_HUB_PORTAL_URL,
+  arcGisHubItemDataUrl,
+  arcGisHubItemPageUrl,
+  arcGisHubItemThumbnailUrl,
+  buildArcGisHubSearchUrl,
+  fetchFeatureServiceGeoJson,
+  itemBounds as arcGisHubItemBounds,
+  sanitizeArcGisHubSearchText,
+  searchArcGisHub,
+  type ArcGisHubItem,
+  type ArcGisHubSearchResult,
+} from "./plugins/arcgis-hub-api";
 export {
   buildSearchUrl,
   buildTitilerTemplate,
@@ -349,6 +435,29 @@ export {
   type OpenAerialMapSearchOptions,
 } from "./plugins/openaerialmap-api";
 export {
+  maplibreStacCatalogsPlugin,
+  setStacLabels,
+  STAC_PLUGIN_ID,
+  type StacLabels,
+} from "./plugins/maplibre-stac";
+export {
+  connectStac,
+  isVisualizableAsset,
+  itemBbox,
+  loadStacIndex,
+  searchStacApi,
+  searchStaticStac,
+  STAC_INDEX_CATALOGS_URL,
+  type StacAsset,
+  type StacCollection,
+  type StacConnection,
+  type StacIndexCatalog,
+  type StacItem,
+  type StacNextPage,
+  type StacSearchOptions,
+  type StacSearchResult,
+} from "./plugins/stac-api";
+export {
   DEFAULT_SOURCE_COOP_LABELS,
   maplibreNaturalEarthPlugin,
   maplibreSourceCoopPlugin,
@@ -358,6 +467,21 @@ export {
   type SourceCoopLabels,
   type SourceCoopPinnedProduct,
 } from "./plugins/maplibre-source-coop";
+export {
+  DEFAULT_HUGGINGFACE_LABELS,
+  HUGGINGFACE_PLUGIN_ID,
+  maplibreHuggingFacePlugin,
+  setHuggingFaceLabels,
+  type HuggingFaceLabels,
+} from "./plugins/maplibre-huggingface";
+export {
+  createGeoLensHostFetch,
+  defaultGeoLensFetch,
+  resetGeoLensFetch,
+  setGeoLensFetch,
+  type GeoLensFetch,
+  type GeoLensHttpResponse,
+} from "./plugins/geolens-api";
 export {
   DEFAULT_GEOLENS_LABELS,
   DEFAULT_GEOLENS_FEATURE_LIMIT,
@@ -422,6 +546,24 @@ export {
   type GraticuleLabelFormat,
   type GraticuleLabelEdges,
 } from "./plugins/maplibre-graticule";
+export {
+  maplibreH3Plugin,
+  H3_PLUGIN_ID,
+  H3_VIEWPORT_CELL_LIMIT,
+  DEFAULT_H3_GRID_SETTINGS,
+  DEFAULT_H3_LABELS,
+  getH3GridSettings,
+  setH3GridSettings,
+  setH3Labels,
+  normalizeH3GridSettings,
+  h3LabelMinZoom,
+  h3CellFeature,
+  h3GridForBounds,
+  h3BoundaryGeometry,
+  unwrapH3Boundary,
+  type H3GridSettings,
+  type H3Labels,
+} from "./plugins/maplibre-h3";
 export type { WeatherAnimationState, WeatherLayerController } from "./plugins/weather-layer";
 export {
   maplibreCloudsPlugin,
@@ -442,6 +584,7 @@ export {
 export {
   maplibreTimeSliderPlugin,
   TIME_SLIDER_PLUGIN_ID,
+  TIME_SLIDER_SOURCE_KIND,
   getActiveTimeSliderControl,
   getLayerTimeBinding,
   isTimeSliderIdle,
@@ -483,8 +626,9 @@ export {
 export {
   bandOptionsFromResults,
   downsampleSteps,
-  getTimeSliderCogSources,
+  getTimeSliderPixelSources,
   hasTimeSliderRasterStack,
+  ordinalSteps,
   queryPixelTimeSeries,
   seriesToFeatureCollection,
   valueAtBand,
@@ -495,6 +639,21 @@ export {
   type PixelTimeSeriesOptions,
   type PixelTimeSeriesResult,
 } from "./plugins/time-slider-pixel-series";
+export {
+  getTimeSliderSymbology,
+  parseBandList,
+  setTimeSliderSymbology,
+  type TimeSliderSymbology,
+  type TimeSliderSymbologyPatch,
+} from "./plugins/time-slider-symbology";
+export {
+  getPixelIdentifiableSource,
+  identifyTimeSliderPixel,
+  isPixelIdentifiableSourceType,
+  PixelOutsideCoverageError,
+  type PixelIdentifiableSpec,
+  type TimeSliderPixelIdentifyResult,
+} from "./plugins/time-slider-pixel-identify";
 export {
   buildTimeBinding,
   buildTimeBindingFromRecords,
@@ -512,6 +671,29 @@ export {
   type TimeWindow,
 } from "./plugins/time-slider-binding";
 export {
+  buildSelectorTimeBinding,
+  getTemporalLayerAdapter,
+  getTemporalLayersVersion,
+  isSelectorTimeBinding,
+  nearestTimeIndex,
+  registerTemporalLayer,
+  subscribeTemporalLayers,
+  toEpochMsAxis,
+  unregisterTemporalLayer,
+  type SelectorTimeBinding,
+  type TemporalLayerAdapter,
+} from "./plugins/temporal-layers";
+export {
+  decodeCfTimeValues,
+  fetchZarrTimeAttributes,
+  parseCfTimeUnits,
+  pickTimeDimension,
+  resolveZarrTimeAxis,
+  type CfTimeUnits,
+  type ZarrTimeAttributes,
+  type ZarrTimeAxis,
+} from "./plugins/zarr-time-axis";
+export {
   isTileVectorLayer,
   resolveTileQueryTargets,
   sampleTileFeatureRecords,
@@ -520,6 +702,14 @@ export {
   type TileSampleStyle,
 } from "./plugins/time-slider-tile-sample";
 export { WEB_SERVICE_PLUGIN_IDS } from "./plugins/web-service-sync";
+export {
+  CKAN_PLUGIN_ID,
+  SOCRATA_PLUGIN_ID,
+  maplibreCkanPlugin,
+  maplibreSocrataPlugin,
+  setOpenDataCatalogLabels,
+  type OpenDataCatalogLabels,
+} from "./plugins/maplibre-open-data-catalogs";
 export {
   DEFAULT_ROUTE_ANIMATION_SETTINGS,
   ROUTE_ANIM_SPEED_MAX,
@@ -572,3 +762,57 @@ export {
   type PointOnLine,
   type RouteWithElevation,
 } from "./plugins/route-animation-geometry";
+export {
+  DEFAULT_FLIGHT_SIMULATOR_SETTINGS,
+  FLIGHT_CAMERA_TOKEN,
+  FLIGHT_MAX_SPEED_MAX,
+  FLIGHT_MAX_SPEED_MIN,
+  FLIGHT_MIN_AGL_MAX,
+  FLIGHT_MIN_AGL_MIN,
+  FLIGHT_SIMULATOR_PLUGIN_ID,
+  FLIGHT_UNITS,
+  LEVEL_CAMERA_PITCH,
+  MAX_CAMERA_PITCH,
+  MIN_CAMERA_PITCH,
+  closeFlightSimulatorPanel,
+  flightSimulatorPlugin,
+  getFlightHudSnapshot,
+  getFlightSimulatorSettings,
+  getFlightSimulatorSnapshot,
+  isFlightSimulatorPanelVisible,
+  isFlying,
+  normalizeFlightSimulatorSettings,
+  openFlightSimulatorPanel,
+  reattachFlightSimulator,
+  restoreFlightSimulator,
+  setFlightSimulatorSettings,
+  startFlying,
+  stopFlying,
+  subscribeFlightHud,
+  subscribeFlightSimulatorPanel,
+  toggleFlying,
+  type FlightHudState,
+  type FlightSimulatorSettings,
+  type FlightUnits,
+} from "./plugins/flight-simulator";
+export {
+  DEFAULT_FLIGHT_MODEL,
+  FEET_PER_METER,
+  KNOTS_PER_MPS,
+  MAX_FLIGHT_LATITUDE,
+  NEUTRAL_CONTROLS,
+  altitudeAboveGround,
+  altitudeForZoom,
+  approach,
+  compassPoint,
+  constrainToTerrain,
+  normalizeHeading,
+  normalizeLongitude,
+  offsetPosition,
+  stepFlight,
+  turnRateDegPerSec,
+  type AircraftState,
+  type FlightControls,
+  type FlightModelConfig,
+  type FlightStepResult,
+} from "./plugins/flight-simulator-physics";

@@ -63,6 +63,8 @@ export interface AssistantProviderConfig {
   apiKey?: string;
   /** OpenAI-compatible base URL (ollama, custom). */
   baseURL?: string;
+  /** Suppress Bearer auth for same-origin proxies protected by browser auth. */
+  suppressAuthorizationHeader?: boolean;
   /** AWS region (bedrock). */
   region?: string;
   /** AWS credentials (bedrock). */
@@ -206,16 +208,24 @@ export function mergeRuntimeEnv({
  * Selectable models per provider, recommended/newest first. The first entry is
  * the provider default. Users can pin any other id via `GEOLIBRE_ASSISTANT_MODEL`
  * (or the per-provider env var) or the model picker. The hosted-model ids were
- * verified against the providers' docs as of 2026-06; the `ollama`/`bedrock`
+ * verified against the providers' docs as of 2026-07; the `ollama`/`bedrock`
  * lists are common examples (use your own via the env vars). `custom` has no
  * preset — supply the model with `OPENAI_COMPATIBLE_MODEL`.
  */
 export const PROVIDER_MODELS: Record<AssistantProviderId, readonly string[]> = {
-  google: ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"],
-  anthropic: ["claude-opus-4-8", "claude-fable-5", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  openai: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
-  ollama: ["llama3.2", "llama3.1", "qwen2.5", "mistral", "gemma2"],
+  google: [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-pro-preview",
+  ],
+  anthropic: ["claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5"],
+  openai: ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+  ollama: ["gemma4", "qwen3.6", "qwen3.5", "llama4", "gpt-oss"],
   bedrock: [
+    "global.anthropic.claude-opus-5",
+    "global.anthropic.claude-fable-5",
+    "global.anthropic.claude-sonnet-5",
     "global.anthropic.claude-sonnet-4-6",
     "global.anthropic.claude-opus-4-8",
     "global.anthropic.claude-haiku-4-5",
@@ -251,12 +261,77 @@ export const PROVIDER_LABELS: Record<AssistantProviderId, string> = {
  */
 export type RuntimeEnv = Record<string, string>;
 
-/** Read the live runtime environment map, or `{}` outside the browser. */
-export function readRuntimeEnv(): RuntimeEnv {
+function browserOrigin(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const origin = window.location?.origin;
+  return origin && origin !== "null" ? origin : undefined;
+}
+
+function managedProxyBaseUrl(proxyUrl: string, baseOrigin?: string): string {
+  let normalized = proxyUrl.trim().replace(/\/+$/, "");
+  if (baseOrigin && normalized.startsWith("/")) {
+    normalized = new URL(normalized, baseOrigin).toString().replace(/\/+$/, "");
+  }
+  return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+/** Public AI proxy configuration embedded by Vite for a managed build. */
+export function readBuildTimeAssistantEnv(
+  viteEnv: Record<string, string | undefined> | undefined = (
+    import.meta as ImportMeta & { env?: Record<string, string | undefined> }
+  ).env,
+  baseOrigin?: string,
+): RuntimeEnv {
+  if (!viteEnv) return {};
+  const result: RuntimeEnv = {};
+  const proxyUrl = viteEnv.VITE_GEOLIBRE_AI_URL?.trim().replace(/\/+$/, "");
+  if (proxyUrl) {
+    result.OPENAI_COMPATIBLE_BASE_URL = managedProxyBaseUrl(proxyUrl, baseOrigin);
+    result.OPENAI_COMPATIBLE_MODEL =
+      viteEnv.VITE_GEOLIBRE_AI_MODEL?.trim() || result.OPENAI_COMPATIBLE_MODEL || "openai/gpt-5.5";
+  }
+  return result;
+}
+
+/** Public proxy configuration injected by the Docker entrypoint at container startup. */
+export function readDeploymentAssistantEnv(): RuntimeEnv {
   if (typeof window === "undefined") return {};
-  return (
-    (window as unknown as { __GEOLIBRE_RUNTIME_ENV__?: RuntimeEnv }).__GEOLIBRE_RUNTIME_ENV__ ?? {}
+  const deploymentEnv = (
+    window as unknown as {
+      __GEOLIBRE_DEPLOYMENT_ENV__?: Record<string, string | undefined>;
+    }
+  ).__GEOLIBRE_DEPLOYMENT_ENV__;
+  const result = readBuildTimeAssistantEnv(deploymentEnv, browserOrigin());
+  if (result.OPENAI_COMPATIBLE_BASE_URL) {
+    result.GEOLIBRE_AI_PROXY_BASE_URL = result.OPENAI_COMPATIBLE_BASE_URL;
+    result.GEOLIBRE_AI_PROXY_OMIT_AUTHORIZATION = "1";
+  }
+  return result;
+}
+
+/**
+ * True when the build or the Docker entrypoint supplied a managed AI proxy.
+ *
+ * Deliberately ignores `__GEOLIBRE_RUNTIME_ENV__`: an endpoint the user typed
+ * into Settings is their own custom provider, not an operator-managed proxy.
+ */
+export function hasManagedAssistantProxy(viteEnv?: Record<string, string | undefined>): boolean {
+  return Boolean(
+    readBuildTimeAssistantEnv(viteEnv, browserOrigin()).OPENAI_COMPATIBLE_BASE_URL ||
+    readDeploymentAssistantEnv().OPENAI_COMPATIBLE_BASE_URL,
   );
+}
+
+/** Read build-time credentials plus the live runtime environment map. */
+export function readRuntimeEnv(): RuntimeEnv {
+  const built = readBuildTimeAssistantEnv(undefined, browserOrigin());
+  if (typeof window === "undefined") return built;
+  return {
+    ...built,
+    ...readDeploymentAssistantEnv(),
+    ...((window as unknown as { __GEOLIBRE_RUNTIME_ENV__?: RuntimeEnv }).__GEOLIBRE_RUNTIME_ENV__ ??
+      {}),
+  };
 }
 
 /** First non-empty value among `names` in `env`, or null. */
@@ -350,11 +425,17 @@ export function configForProvider(
       const baseURL = firstValue(env, "OPENAI_COMPATIBLE_BASE_URL");
       if (!baseURL || !modelId) return null;
       const apiKey = firstValue(env, "OPENAI_COMPATIBLE_API_KEY") ?? "not-needed";
+      const normalizedBaseURL = baseURL.replace(/\/+$/, "");
+      const proxyBaseURL = firstValue(env, "GEOLIBRE_AI_PROXY_BASE_URL")?.replace(/\/+$/, "");
       return {
         provider,
         apiKey,
-        baseURL: baseURL.replace(/\/+$/, ""),
+        baseURL: normalizedBaseURL,
         modelId,
+        suppressAuthorizationHeader:
+          env.GEOLIBRE_AI_PROXY_OMIT_AUTHORIZATION === "1" &&
+          Boolean(proxyBaseURL) &&
+          normalizedBaseURL === proxyBaseURL,
       };
     }
     case "bedrock": {
@@ -456,6 +537,7 @@ export async function createModel(config: AssistantProviderConfig): Promise<Mode
         modelId: config.modelId,
         clientConfig: {
           baseURL: config.baseURL,
+          defaultHeaders: config.suppressAuthorizationHeader ? { Authorization: null } : undefined,
           dangerouslyAllowBrowser: true,
         },
       }) as unknown as Model;

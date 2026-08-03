@@ -16,16 +16,22 @@ import {
   openRasterLayerPanel,
   openSplattingLayerPanel,
   openStacSearchLayerPanel,
+  openZarrLayerPanel,
   openThreeDTilesLayerPanel,
   openVectorLayerPanel,
-  openZarrLayerPanel,
   setAnnotationLabels,
   setBasemapControlLabels,
   setGraticuleLabels,
+  setH3Labels,
   setMapillaryLabels,
+  setEarthdataGisLabels,
   setOpenAerialMapLabels,
+  setArcGisHubLabels,
+  setOpenDataCatalogLabels,
+  setHuggingFaceLabels,
   setSourceCoopLabels,
   setReverseGeocodeLabels,
+  setStacLabels,
   setTimelapseLabels,
   DECK_VIZ_PLUGIN_ID,
   DIRECTIONS_PLUGIN_ID,
@@ -34,6 +40,7 @@ import {
   PRECIPITATION_PLUGIN_ID,
   REVERSE_GEOCODE_PLUGIN_ID,
   EFFECTS_PLUGIN_ID,
+  openRightPanel,
 } from "@geolibre/plugins";
 import { Button, cn, Input } from "@geolibre/ui";
 import {
@@ -71,7 +78,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { createAppAPI, getPluginManager, usePluginRegistry } from "../../hooks/usePlugins";
 import { useConsentGatedActions } from "../../hooks/useConsentGatedActions";
@@ -80,6 +87,7 @@ import type { ProjectFileActions } from "../../hooks/useProjectFileActions";
 import { useToolbarPanels } from "../../hooks/useToolbarPanels";
 import { useVectorTileGeometryBackfill } from "../../hooks/useVectorTileGeometryBackfill";
 import type { ThemeMode } from "../../hooks/useThemeMode";
+import { isMobile } from "../../lib/is-mobile";
 import { isTauri } from "../../lib/tauri-io";
 import { isMaptoolkitBasemapActive } from "../../lib/maptoolkit-basemap";
 import { useDesktopSettingsStore } from "../../hooks/useDesktopSettings";
@@ -89,6 +97,8 @@ import { KeyboardShortcutsDialog } from "../command/KeyboardShortcutsDialog";
 import { useGlobalShortcuts } from "../../hooks/useGlobalShortcuts";
 import { useViewportHistory } from "../../hooks/useViewportHistory";
 import type { Command } from "../../lib/commands";
+import { IS_MAS_BUILD } from "../../lib/build-flags";
+import { masHidesDataSource } from "../../lib/mas-build";
 import { IS_STORE_BUILD } from "../../lib/updates";
 import { AddDataDialog, type AddDataKind } from "./AddDataDialog";
 import {
@@ -121,7 +131,7 @@ import { HelpMenu } from "./toolbar/HelpMenu";
 import { OsmPbfDialogs } from "./toolbar/OsmPbfDialogs";
 import { PluginsMenu } from "./toolbar/PluginsMenu";
 import { PluginToolbarMenus } from "./toolbar/PluginToolbarMenus";
-import { ProcessingMenu } from "./toolbar/ProcessingMenu";
+import { EARTH_ENGINE_AVAILABLE, ProcessingMenu } from "./toolbar/ProcessingMenu";
 import { ProjectFileDialogs } from "./toolbar/ProjectFileDialogs";
 import { ProjectMenu } from "./toolbar/ProjectMenu";
 import { googleEarthUrl, googleMapsUrl } from "../../lib/external-map-links";
@@ -158,10 +168,12 @@ interface TopToolbarProps {
   // instance — two would not coordinate their in-flight "open recent" aborts.
   projectFiles: ProjectFileActions;
   onOpenDiagnostics: () => void;
+  onOpenProjectHistory: () => void;
   onToggleThemeMode: () => void;
   // Opens the Offline Basemap Extract panel, mounted in DesktopShell over the
   // map so it can stay non-modal (the map is interactive for drawing a bbox).
   onOpenBasemapExtract: () => void;
+  viewer?: boolean;
 }
 
 export function TopToolbar({
@@ -175,8 +187,10 @@ export function TopToolbar({
   collaboration,
   projectFiles,
   onOpenDiagnostics,
+  onOpenProjectHistory,
   onToggleThemeMode,
   onOpenBasemapExtract,
+  viewer = false,
 }: TopToolbarProps) {
   const { t, i18n } = useTranslation();
   // The reverse-geocode plugin lives in the framework-agnostic plugins package
@@ -195,12 +209,16 @@ export function TopToolbar({
     setAnnotationLabels({
       toolbar: t("annotations.toolbar"),
       layerName: t("annotations.layerName"),
+      elementsPanelTitle: t("annotations.elementsPanelTitle"),
       tools: {
         text: t("annotations.tools.text"),
         arrow: t("annotations.tools.arrow"),
         rectangle: t("annotations.tools.rectangle"),
         ellipse: t("annotations.tools.ellipse"),
         freehand: t("annotations.tools.freehand"),
+        pin: t("annotations.tools.pin"),
+        sticky_note: t("annotations.tools.sticky_note"),
+        placed_image: t("annotations.tools.placed_image"),
       },
       color: t("annotations.color"),
       width: t("annotations.width"),
@@ -212,6 +230,14 @@ export function TopToolbar({
       deleteLast: t("annotations.deleteLast"),
       clearAll: t("annotations.clearAll"),
       textPlaceholder: t("annotations.textPlaceholder"),
+      pinTitlePrompt: t("annotations.pinTitlePrompt"),
+      pinDescPrompt: t("annotations.pinDescPrompt"),
+      stickyNotePrompt: t("annotations.stickyNotePrompt"),
+      imageUrlPrompt: t("annotations.imageUrlPrompt"),
+      cancel: t("annotations.cancel"),
+      saveElement: t("annotations.saveElement"),
+      atPoint: t("annotations.atPoint"),
+      pinnedToExtent: t("annotations.pinnedToExtent"),
     });
     setMapillaryLabels({
       title: t("mapillary.title"),
@@ -273,6 +299,125 @@ export function TopToolbar({
       metaSource: t("openAerialMap.metaSource"),
       metaRaw: t("openAerialMap.metaRaw"),
     });
+    setArcGisHubLabels({
+      hint: t("arcgisHub.hint"),
+      searchPlaceholder: t("arcgisHub.searchPlaceholder"),
+      search: t("arcgisHub.search"),
+      searchCurrentView: t("arcgisHub.searchCurrentView"),
+      enterKeyword: t("arcgisHub.enterKeyword"),
+      loadMore: t("arcgisHub.loadMore"),
+      searching: t("arcgisHub.searching"),
+      loadingMore: t("arcgisHub.loadingMore"),
+      noResults: t("arcgisHub.noResults"),
+      searchError: t("arcgisHub.searchError"),
+      showing: (shown, total) => t("arcgisHub.showing", { shown, total }),
+      noDescription: t("arcgisHub.noDescription"),
+      add: t("arcgisHub.add"),
+      adding: (title) => t("arcgisHub.adding", { title }),
+      added: (title) => t("arcgisHub.added", { title }),
+      addError: t("arcgisHub.addError"),
+      zoom: t("arcgisHub.zoom"),
+      download: t("arcgisHub.download"),
+      preparing: (title) => t("arcgisHub.preparing", { title }),
+      downloading: (completed, total, title) =>
+        t("arcgisHub.downloading", { completed, total, title }),
+      downloadStarted: (title) => t("arcgisHub.downloadStarted", { title }),
+      downloadFirstLayer: (title, layerCount) =>
+        t("arcgisHub.downloadFirstLayer", { title, layerCount }),
+      downloadError: t("arcgisHub.downloadError"),
+      details: t("arcgisHub.details"),
+    });
+    setOpenDataCatalogLabels({
+      socrataHint: t("openDataCatalogs.socrataHint"),
+      ckanHint: t("openDataCatalogs.ckanHint"),
+      searchPlaceholder: (name) => t("openDataCatalogs.searchPlaceholder", { name }),
+      search: t("openDataCatalogs.search"),
+      enterKeyword: t("openDataCatalogs.enterKeyword"),
+      loadMore: t("openDataCatalogs.loadMore"),
+      searching: t("openDataCatalogs.searching"),
+      noResults: t("openDataCatalogs.noResults"),
+      showing: (shown, total) => t("openDataCatalogs.showing", { shown, total }),
+      noDescription: t("openDataCatalogs.noDescription"),
+      add: t("openDataCatalogs.add"),
+      details: t("openDataCatalogs.details"),
+      adding: (title) => t("openDataCatalogs.adding", { title }),
+      added: (title) => t("openDataCatalogs.added", { title }),
+      addError: t("openDataCatalogs.addError"),
+      searchError: t("openDataCatalogs.searchError"),
+    });
+    setEarthdataGisLabels({
+      hint: t("earthdataGis.hint"),
+      searchPlaceholder: t("earthdataGis.searchPlaceholder"),
+      search: t("earthdataGis.search"),
+      searching: t("earthdataGis.searching"),
+      loadingMore: t("earthdataGis.loadingMore"),
+      loadMore: t("earthdataGis.loadMore"),
+      noResults: t("earthdataGis.noResults"),
+      showing: (shown, total) => t("earthdataGis.showing", { shown, total }),
+      searchError: (message) => t("earthdataGis.searchError", { message }),
+      limitToView: t("earthdataGis.limitToView"),
+      limitToViewTitle: t("earthdataGis.limitToViewTitle"),
+      filterAll: t("earthdataGis.filterAll"),
+      filterImage: t("earthdataGis.filterImage"),
+      filterMap: t("earthdataGis.filterMap"),
+      filterFeature: t("earthdataGis.filterFeature"),
+      kindImage: t("earthdataGis.kindImage"),
+      kindMap: t("earthdataGis.kindMap"),
+      kindFeature: t("earthdataGis.kindFeature"),
+      kindWebMap: t("earthdataGis.kindWebMap"),
+      filterWebMap: t("earthdataGis.filterWebMap"),
+      webMapAdded: (added, total) =>
+        added === total
+          ? t("earthdataGis.webMapAdded", { count: added })
+          : t("earthdataGis.webMapAddedPartial", { added, total }),
+      webMapEmpty: t("earthdataGis.webMapEmpty"),
+      add: t("earthdataGis.add"),
+      adding: t("earthdataGis.adding"),
+      remove: t("earthdataGis.remove"),
+      zoom: t("earthdataGis.zoom"),
+      details: t("earthdataGis.details"),
+      portal: t("earthdataGis.portal"),
+      portalTitle: t("earthdataGis.portalTitle"),
+      cog: t("earthdataGis.cog"),
+      cogTitle: t("earthdataGis.cogTitle"),
+      cogHeading: t("earthdataGis.cogHeading"),
+      cogAreaView: t("earthdataGis.cogAreaView"),
+      cogAreaExtent: t("earthdataGis.cogAreaExtent"),
+      cogSize: (width, height) => t("earthdataGis.cogSize", { width, height }),
+      cogResolution: (metres) => t("earthdataGis.cogResolution", { metres }),
+      cogNote: t("earthdataGis.cogNote"),
+      cogDownload: t("earthdataGis.cogDownload"),
+      cogDownloading: t("earthdataGis.cogDownloading"),
+      cogRetrying: (width, height) => t("earthdataGis.cogRetrying", { width, height }),
+      cogConverting: t("earthdataGis.cogConverting"),
+      cogDone: (width, height) => t("earthdataGis.cogDone", { width, height }),
+      cogFailed: (message) => t("earthdataGis.cogFailed", { message }),
+      cogUnavailable: t("earthdataGis.cogUnavailable"),
+      cancel: t("earthdataGis.cancel"),
+      addTitle: t("earthdataGis.addTitle"),
+      removeTitle: t("earthdataGis.removeTitle"),
+      zoomTitle: t("earthdataGis.zoomTitle"),
+      zoomUnavailableTitle: t("earthdataGis.zoomUnavailableTitle"),
+      detailsTitle: t("earthdataGis.detailsTitle"),
+      addError: (message) => t("earthdataGis.addError", { message }),
+      addTimeout: t("earthdataGis.addTimeout"),
+      zoomedToData: t("earthdataGis.zoomedToData"),
+      detailsHeading: t("earthdataGis.detailsHeading"),
+      close: t("earthdataGis.close"),
+      metaTitle: t("earthdataGis.metaTitle"),
+      metaType: t("earthdataGis.metaType"),
+      metaSummary: t("earthdataGis.metaSummary"),
+      metaDescription: t("earthdataGis.metaDescription"),
+      metaOwner: t("earthdataGis.metaOwner"),
+      metaModified: t("earthdataGis.metaModified"),
+      metaTags: t("earthdataGis.metaTags"),
+      metaExtent: t("earthdataGis.metaExtent"),
+      metaCredits: t("earthdataGis.metaCredits"),
+      metaLicense: t("earthdataGis.metaLicense"),
+      metaService: t("earthdataGis.metaService"),
+      metaPortalItem: t("earthdataGis.metaPortalItem"),
+      metaRaw: t("earthdataGis.metaRaw"),
+    });
     setSourceCoopLabels({
       hint: t("sourceCoop.hint"),
       searchPlaceholder: t("sourceCoop.searchPlaceholder"),
@@ -313,6 +458,114 @@ export function TopToolbar({
       streamHint: (size) => t("sourceCoop.streamHint", { size }),
       tooLargeToOpen: (size, limit) => t("sourceCoop.tooLargeToOpen", { size, limit }),
     });
+    setHuggingFaceLabels({
+      browseTab: t("huggingFace.browseTab"),
+      uploadTab: t("huggingFace.uploadTab"),
+      settingsTab: t("huggingFace.settingsTab"),
+      hint: t("huggingFace.hint"),
+      searchPlaceholder: t("huggingFace.searchPlaceholder"),
+      search: t("huggingFace.search"),
+      searching: t("huggingFace.searching"),
+      loadError: (message) => t("huggingFace.loadError", { message }),
+      noResults: t("huggingFace.noResults"),
+      retry: t("huggingFace.retry"),
+      suggestions: t("huggingFace.suggestions"),
+      showing: (count) => t("huggingFace.showing", { count }),
+      browseOwner: (owner) => t("huggingFace.browseOwner", { owner }),
+      back: t("huggingFace.back"),
+      private: t("huggingFace.private"),
+      gated: t("huggingFace.gated"),
+      privateHint: t("huggingFace.privateHint"),
+      stats: (likes, downloads) => t("huggingFace.stats", { likes, downloads }),
+      noFiles: t("huggingFace.noFiles"),
+      loadingFiles: t("huggingFace.loadingFiles"),
+      loadMore: t("huggingFace.loadMore"),
+      parent: t("huggingFace.parent"),
+      add: t("huggingFace.add"),
+      adding: t("huggingFace.adding"),
+      stream: t("huggingFace.stream"),
+      streaming: t("huggingFace.streaming"),
+      remove: t("huggingFace.remove"),
+      download: t("huggingFace.download"),
+      copyUrl: t("huggingFace.copyUrl"),
+      copied: t("huggingFace.copied"),
+      openDataset: t("huggingFace.openDataset"),
+      addTitle: t("huggingFace.addTitle"),
+      streamTitle: t("huggingFace.streamTitle"),
+      removeTitle: t("huggingFace.removeTitle"),
+      downloadTitle: t("huggingFace.downloadTitle"),
+      copyUrlTitle: t("huggingFace.copyUrlTitle"),
+      openDatasetTitle: t("huggingFace.openDatasetTitle"),
+      unsupportedTitle: t("huggingFace.unsupportedTitle"),
+      addError: (message) => t("huggingFace.addError", { message }),
+      notRasterIndex: t("huggingFace.notRasterIndex"),
+      largeFileWarning: (size) => t("huggingFace.largeFileWarning", { size }),
+      streamHint: (size) => t("huggingFace.streamHint", { size }),
+      tooLargeToOpen: (size, limit) => t("huggingFace.tooLargeToOpen", { size, limit }),
+      tokenLabel: t("huggingFace.tokenLabel"),
+      tokenHint: t("huggingFace.tokenHint"),
+      tokenPlaceholder: t("huggingFace.tokenPlaceholder"),
+      tokenSave: t("huggingFace.tokenSave"),
+      tokenClear: t("huggingFace.tokenClear"),
+      tokenHelp: t("huggingFace.tokenHelp"),
+      tokenChecking: t("huggingFace.tokenChecking"),
+      tokenError: (message) => t("huggingFace.tokenError", { message }),
+      signedInAs: (name) => t("huggingFace.signedInAs", { name }),
+      readOnlyToken: t("huggingFace.readOnlyToken"),
+      createHeading: t("huggingFace.createHeading"),
+      ownerLabel: t("huggingFace.ownerLabel"),
+      datasetNameLabel: t("huggingFace.datasetNameLabel"),
+      datasetNamePlaceholder: t("huggingFace.datasetNamePlaceholder"),
+      privateLabel: t("huggingFace.privateLabel"),
+      create: t("huggingFace.create"),
+      creating: t("huggingFace.creating"),
+      createdRepo: (repoId) => t("huggingFace.createdRepo", { repoId }),
+      createError: (message) => t("huggingFace.createError", { message }),
+      uploadHeading: t("huggingFace.uploadHeading"),
+      targetLabel: t("huggingFace.targetLabel"),
+      targetPlaceholder: t("huggingFace.targetPlaceholder"),
+      folderLabel: t("huggingFace.folderLabel"),
+      folderPlaceholder: t("huggingFace.folderPlaceholder"),
+      chooseFiles: t("huggingFace.chooseFiles"),
+      chooseLayer: t("huggingFace.chooseLayer"),
+      chooseLayerTitle: t("huggingFace.chooseLayerTitle"),
+      layerPickerHeading: t("huggingFace.layerPickerHeading"),
+      layerFeatures: (count) => t("huggingFace.layerFeatures", { count }),
+      layerOriginalFile: t("huggingFace.layerOriginalFile"),
+      layerUnavailable: (name) => t("huggingFace.layerUnavailable", { name }),
+      remoteRasterNote: t("huggingFace.remoteRasterNote"),
+      noUploadableLayers: t("huggingFace.noUploadableLayers"),
+      clearSelection: t("huggingFace.clearSelection"),
+      selectedFiles: (count, size) => t("huggingFace.selectedFiles", { count, size }),
+      commitMessageLabel: t("huggingFace.commitMessageLabel"),
+      commitMessagePlaceholder: t("huggingFace.commitMessagePlaceholder"),
+      upload: t("huggingFace.upload"),
+      uploadPreparing: t("huggingFace.uploadPreparing"),
+      uploadHashing: (name, index, total) => t("huggingFace.uploadHashing", { name, index, total }),
+      uploadSending: (name, index, total) => t("huggingFace.uploadSending", { name, index, total }),
+      uploadCommitting: t("huggingFace.uploadCommitting"),
+      uploadDone: (count) => t("huggingFace.uploadDone", { count }),
+      uploadError: (message) => t("huggingFace.uploadError", { message }),
+      fileTooLarge: (name, limit) => t("huggingFace.fileTooLarge", { name, limit }),
+      selectionTooLarge: (size, limit) => t("huggingFace.selectionTooLarge", { size, limit }),
+      openUploaded: t("huggingFace.openUploaded"),
+      rgbHeading: t("huggingFace.rgbHeading"),
+      rgbHint: t("huggingFace.rgbHint"),
+      bandR: t("huggingFace.bandR"),
+      bandG: t("huggingFace.bandG"),
+      bandB: t("huggingFace.bandB"),
+      colormapHeading: t("huggingFace.colormapHeading"),
+      colormapHint: t("huggingFace.colormapHint"),
+      colormapLabel: t("huggingFace.colormapLabel"),
+      engineHeading: t("huggingFace.engineHeading"),
+      engineHint: t("huggingFace.engineHint"),
+      engineLabel: t("huggingFace.engineLabel"),
+      engineAuto: t("huggingFace.engineAuto"),
+      engineGpu: t("huggingFace.engineGpu"),
+      engineWasm: t("huggingFace.engineWasm"),
+      engineTitiler: t("huggingFace.engineTitiler"),
+      resetDefaults: t("huggingFace.resetDefaults"),
+    });
     setGraticuleLabels({
       title: t("graticule.title"),
       getTitle: () => i18n.t("graticule.title"),
@@ -339,6 +592,37 @@ export function TopToolbar({
       labelColor: t("graticule.labelColor"),
       labelSize: t("graticule.labelSize"),
     });
+    setH3Labels({
+      title: t("h3Plugin.title"),
+      getTitle: () => i18n.t("h3Plugin.title"),
+      controlTitle: t("h3Plugin.controlTitle"),
+      resolution: t("h3Plugin.resolution"),
+      cellCount: (count) => t("h3Plugin.cellCount", { count }),
+      tooManyCells: (limit) => t("h3Plugin.tooManyCells", { limit }),
+      fillColor: t("h3Plugin.fillColor"),
+      fillOpacity: t("h3Plugin.fillOpacity"),
+      lineColor: t("h3Plugin.lineColor"),
+      lineWidth: t("h3Plugin.lineWidth"),
+      showLabels: t("h3Plugin.showLabels"),
+      identifyHint: t("h3Plugin.identifyHint"),
+      selectedCell: t("h3Plugin.selectedCell"),
+      noSelection: t("h3Plugin.noSelection"),
+      copyId: t("h3Plugin.copyId"),
+      copied: t("h3Plugin.copied"),
+      parent: t("h3Plugin.parent"),
+      children: t("h3Plugin.children"),
+      neighbors: t("h3Plugin.neighbors"),
+      baseCell: t("h3Plugin.baseCell"),
+      center: t("h3Plugin.center"),
+      pentagon: t("h3Plugin.pentagon"),
+      yes: t("h3Plugin.yes"),
+      no: t("h3Plugin.no"),
+      zoomToCell: t("h3Plugin.zoomToCell"),
+      addAsLayer: t("h3Plugin.addAsLayer"),
+      exportGeoJson: t("h3Plugin.exportGeoJson"),
+      exportCsv: t("h3Plugin.exportCsv"),
+      includeNeighbors: t("h3Plugin.includeNeighbors"),
+    });
     setTimelapseLabels({
       title: t("timelapse.title"),
       provider: t("timelapse.provider"),
@@ -356,6 +640,73 @@ export function TopToolbar({
       recordingFailed: t("timelapse.recordingFailed"),
       recordingUnsupported: t("timelapse.recordingUnsupported"),
       loadingTiles: t("timelapse.loadingTiles"),
+    });
+    setStacLabels({
+      title: t("stacPlugin.title"),
+      getTitle: () => i18n.t("stacPlugin.title"),
+      footprintLayerName: t("stacPlugin.footprintLayerName"),
+      catalogSearch: t("stacPlugin.catalogSearch"),
+      catalogSearchPlaceholder: t("stacPlugin.catalogSearchPlaceholder"),
+      indexLoading: t("stacPlugin.indexLoading"),
+      indexUnavailable: t("stacPlugin.indexUnavailable"),
+      indexLoadFailed: t("stacPlugin.indexLoadFailed"),
+      urlLabel: t("stacPlugin.urlLabel"),
+      connect: t("stacPlugin.connect"),
+      connecting: t("stacPlugin.connecting"),
+      connected: t("stacPlugin.connected"),
+      connectFailed: t("stacPlugin.connectFailed"),
+      selectCatalog: t("stacPlugin.selectCatalog"),
+      noMatchingCatalogs: t("stacPlugin.noMatchingCatalogs"),
+      catalogApiSuffix: t("stacPlugin.catalogApiSuffix"),
+      catalogStaticSuffix: t("stacPlugin.catalogStaticSuffix"),
+      kindApi: t("stacPlugin.kindApi"),
+      kindStatic: t("stacPlugin.kindStatic"),
+      collectionsHint: t("stacPlugin.collectionsHint"),
+      limitToExtent: t("stacPlugin.limitToExtent"),
+      bboxLabel: t("stacPlugin.bboxLabel"),
+      bboxPlaceholder: t("stacPlugin.bboxPlaceholder"),
+      bboxInvalid: t("stacPlugin.bboxInvalid"),
+      drawBbox: t("stacPlugin.drawBbox"),
+      cancelDrawing: t("stacPlugin.cancelDrawing"),
+      clearDrawnBbox: t("stacPlugin.clearDrawnBbox"),
+      drawHint: t("stacPlugin.drawHint"),
+      drawnBbox: (bbox) => t("stacPlugin.drawnBbox", { bbox }),
+      drawnBboxCleared: t("stacPlugin.drawnBboxCleared"),
+      mapNotReady: t("stacPlugin.mapNotReady"),
+      startDate: t("stacPlugin.startDate"),
+      endDate: t("stacPlugin.endDate"),
+      additionalParams: t("stacPlugin.additionalParams"),
+      additionalInvalid: t("stacPlugin.additionalInvalid"),
+      searchItems: t("stacPlugin.searchItems"),
+      clearResults: t("stacPlugin.clearResults"),
+      resultsCleared: t("stacPlugin.resultsCleared"),
+      searching: t("stacPlugin.searching"),
+      loadingMore: t("stacPlugin.loadingMore"),
+      noResults: t("stacPlugin.noResults"),
+      searchFailed: t("stacPlugin.searchFailed"),
+      showing: (count) => t("stacPlugin.showing", { count }),
+      showingOfMatched: (count, matched) => t("stacPlugin.showingOfMatched", { count, matched }),
+      loadMore: t("stacPlugin.loadMore"),
+      renderOptions: t("stacPlugin.renderOptions"),
+      bands: t("stacPlugin.bands"),
+      bandsPlaceholder: t("stacPlugin.bandsPlaceholder"),
+      colormap: t("stacPlugin.colormap"),
+      colormapDefault: t("stacPlugin.colormapDefault"),
+      minValue: t("stacPlugin.minValue"),
+      maxValue: t("stacPlugin.maxValue"),
+      nodata: t("stacPlugin.nodata"),
+      nodataPlaceholder: t("stacPlugin.nodataPlaceholder"),
+      renderHint: t("stacPlugin.renderHint"),
+      initialStatus: t("stacPlugin.initialStatus"),
+      catalogInfo: (title, kind) => t("stacPlugin.catalogInfo", { title, kind }),
+      zoom: t("stacPlugin.zoom"),
+      add: t("stacPlugin.add"),
+      download: t("stacPlugin.download"),
+      adding: (asset) => t("stacPlugin.adding", { asset }),
+      added: (asset) => t("stacPlugin.added", { asset }),
+      addUnsupported: t("stacPlugin.addUnsupported"),
+      addFailed: t("stacPlugin.addFailed"),
+      cogUnsupported: t("stacPlugin.cogUnsupported"),
     });
   }, [t]);
 
@@ -452,6 +803,17 @@ export function TopToolbar({
     ),
   );
   const [addDataKind, setAddDataKind] = useState<AddDataKind | null>(null);
+  const [addDataTargetGroupId, setAddDataTargetGroupId] = useState<string | null>(null);
+  const addDataInitialLayerIdsRef = useRef<Set<string>>(new Set());
+  // Every path that opens the dialog outside the OPEN_ADD_DATA_EVENT listener
+  // (the Add Data menu, the command palette, the 3D-model button) is ungrouped,
+  // so it must drop any group target a previous open left behind — otherwise
+  // this session's layers would be swept into that stale, unrelated group when
+  // the dialog closes. Only the listener sets a target, and it sets both.
+  const openAddDataKind = useCallback((kind: AddDataKind) => {
+    setAddDataTargetGroupId(null);
+    setAddDataKind(kind);
+  }, []);
   // PostgreSQL prefill (saved connection / clicked table) from the Browser panel.
   const [addDataPostgres, setAddDataPostgres] = useState<OpenAddDataPostgres | undefined>(
     undefined,
@@ -470,8 +832,14 @@ export function TopToolbar({
   useEffect(() => {
     const onOpenAddData = (event: Event) => {
       const detail = (event as CustomEvent<OpenAddDataDetail>).detail;
-      if (detail?.kind) {
+      // Reject kinds the Mac App Store build hides so a stray event cannot
+      // open a dialog whose backing service is compiled out.
+      if (detail?.kind && !masHidesDataSource(detail.kind)) {
         setAddDataPostgres(detail.postgres);
+        setAddDataTargetGroupId(detail.groupId ?? null);
+        addDataInitialLayerIdsRef.current = new Set(
+          useAppStore.getState().layers.map((layer) => layer.id),
+        );
         setAddDataKind(detail.kind);
       }
     };
@@ -659,12 +1027,16 @@ export function TopToolbar({
       group: t("toolbar.commandGroup.addData"),
       run: () => osmPbf.setDialogOpen(true),
     },
-    ...ADD_DATA_KIND_COMMANDS.map(({ kind, titleKey }) => ({
-      id: `add.${kind}`,
-      title: t("toolbar.command.addLayer", { name: t(titleKey) }),
-      group: t("toolbar.commandGroup.addData"),
-      run: () => setAddDataKind(kind),
-    })),
+    // Sources the Mac App Store build hides in the Add Data menu must not be
+    // reachable through the palette either.
+    ...ADD_DATA_KIND_COMMANDS.filter(({ kind }) => !masHidesDataSource(kind)).map(
+      ({ kind, titleKey }) => ({
+        id: `add.${kind}`,
+        title: t("toolbar.command.addLayer", { name: t(titleKey) }),
+        group: t("toolbar.commandGroup.addData"),
+        run: () => openAddDataKind(kind),
+      }),
+    ),
     {
       id: "add.stac",
       title: t("toolbar.command.addStacLayer"),
@@ -772,14 +1144,20 @@ export function TopToolbar({
       icon: Workflow,
       run: () => setModelBuilderOpen(true),
     },
-    {
-      id: "proc.segmentation",
-      title: t("toolbar.command.segmentation"),
-      group: t("toolbar.commandGroup.processing"),
-      keywords: "segmentation samgeo sam3 ai segment imagery",
-      icon: Sparkles,
-      run: () => setSegmentationOpen(true),
-    },
+    // The Mac App Store build omits AI Segmentation: it is sidecar-only (the
+    // App Sandbox forbids the sidecar) and has no client-side fallback.
+    ...(IS_MAS_BUILD
+      ? []
+      : [
+          {
+            id: "proc.segmentation",
+            title: t("toolbar.command.segmentation"),
+            group: t("toolbar.commandGroup.processing"),
+            keywords: "segmentation samgeo sam3 ai segment imagery",
+            icon: Sparkles,
+            run: () => setSegmentationOpen(true),
+          },
+        ]),
     {
       id: "proc.objectDetection",
       title: t("toolbar.command.objectDetection"),
@@ -823,12 +1201,21 @@ export function TopToolbar({
       group: t("toolbar.commandGroup.processing"),
       run: handleOpenPlanetaryComputer,
     },
-    {
-      id: "proc.earth-engine",
-      title: t("toolbar.command.earthEngine"),
-      group: t("toolbar.commandGroup.processing"),
-      run: panels.earthEngine.toggle,
-    },
+    // Earth Engine sign-in needs the Rust loopback OAuth listener, which the
+    // Apple App Store builds (Mac App Store and iOS) compile out so the app
+    // claims no `com.apple.security.network.server` entitlement. Shares the
+    // ProcessingMenu gate's module-level constant rather than recomputing it in
+    // this array, which is rebuilt on every render.
+    ...(EARTH_ENGINE_AVAILABLE
+      ? [
+          {
+            id: "proc.earth-engine",
+            title: t("toolbar.command.earthEngine"),
+            group: t("toolbar.commandGroup.processing"),
+            run: panels.earthEngine.toggle,
+          },
+        ]
+      : []),
     // Controls
     ...MAP_CONTROL_ITEMS.map((control) => ({
       id: `control.${control.id}`,
@@ -977,6 +1364,14 @@ export function TopToolbar({
       run: () => setSetViewOpen(true),
     },
     {
+      id: "view.comments",
+      title: "View Comments",
+      group: t("toolbar.commandGroup.view"),
+      keywords: "comments review threads notes annotations pins",
+      icon: MessageSquare,
+      run: () => openRightPanel("comments"),
+    },
+    {
       id: "view.theme",
       title:
         themeMode === "dark"
@@ -1072,13 +1467,20 @@ export function TopToolbar({
         run: () => toggle(plugin.id, appApi),
       })),
     // Settings
-    {
-      id: "settings.manage-plugins",
-      title: t("toolbar.command.managePlugins"),
-      group: t("toolbar.commandGroup.settings"),
-      keywords: "install external plugin marketplace",
-      run: () => setManagePluginsOpen(true),
-    },
+    // The Mac App Store build omits the plugin marketplace: installing
+    // external plugins is not allowed there, and bundled plugins need no
+    // management. Same pattern as the Store build's update command above.
+    ...(IS_MAS_BUILD
+      ? []
+      : [
+          {
+            id: "settings.manage-plugins",
+            title: t("toolbar.command.managePlugins"),
+            group: t("toolbar.commandGroup.settings"),
+            keywords: "install external plugin marketplace",
+            run: () => setManagePluginsOpen(true),
+          },
+        ]),
     {
       id: "settings.style-manager",
       title: t("toolbar.command.styleManager"),
@@ -1089,10 +1491,27 @@ export function TopToolbar({
     },
   ];
 
+  // The viewer preset hides every authoring menu, so the surfaces that reach
+  // those commands without a menu go with them: the command palette
+  // (Ctrl/Cmd+K) and the cheat sheet (?) are not mounted, and the Help menu
+  // drops its entries for them (see `viewer` on HelpMenu). Otherwise a
+  // `layout=viewer` embed would still answer Ctrl+N with "New Project", or
+  // overwrite the host's project on Ctrl+S — exactly what the read-only chrome
+  // promises it cannot do.
+  //
+  // The shortcut layer is narrowed rather than switched off, because the View
+  // menu *does* stay visible in this mode: `view.*` is camera and theme work
+  // only, so dropping its keys would leave those items clickable but silently
+  // keyless. Every command carrying a `shortcut` is either `view.*` or
+  // `project.*`, so this is the whole authoring keyboard surface.
+  const shortcutCommands = useMemo(
+    () => (viewer ? commands.filter((command) => command.id.startsWith("view.")) : commands),
+    [commands, viewer],
+  );
   useGlobalShortcuts({
-    commands,
-    onOpenPalette: () => setCommandPaletteOpen(true),
-    onOpenShortcuts: () => setShortcutsOpen(true),
+    commands: shortcutCommands,
+    onOpenPalette: viewer ? undefined : () => setCommandPaletteOpen(true),
+    onOpenShortcuts: viewer ? undefined : () => setShortcutsOpen(true),
   });
 
   const toolbarButtonSize = compact ? "icon" : "sm";
@@ -1103,7 +1522,11 @@ export function TopToolbar({
   // its trigger Button this class instead of `toolbarButtonClass`.
   const toolbarSecondaryButtonClass = cn(toolbarButtonClass, "hidden md:inline-flex");
   const toolbarIconClassName = cn("h-3.5 w-3.5", showLabels && "sm:me-1");
-  const appTitle = isTauri() ? "GeoLibre Desktop" : "GeoLibre";
+  // "GeoLibre Desktop" is the *desktop* product name. `isTauri()` alone is true
+  // on iOS and Android too — where the app is named plain "GeoLibre" (the bundle
+  // name from tauri.ios.conf.json, the home-screen icon, and the store listing),
+  // so titling it "GeoLibre Desktop" there contradicts every other surface.
+  const appTitle = isTauri() && !isMobile() ? "GeoLibre Desktop" : "GeoLibre";
   const renderToolbarLabel = (label: string) =>
     showLabels ? <span className="hidden sm:inline">{label}</span> : null;
   const chrome: ToolbarChrome = {
@@ -1128,7 +1551,7 @@ export function TopToolbar({
         <Map className="h-4 w-4" />
         {showProjectInfo ? <span className="hidden sm:inline">{appTitle}</span> : null}
       </span>
-      {isMenuVisible(uiProfile, "project") && (
+      {!viewer && isMenuVisible(uiProfile, "project") && (
         <ProjectMenu
           chrome={chrome}
           collaborationEnabled={collaboration.enabled}
@@ -1136,13 +1559,18 @@ export function TopToolbar({
           onOpenFromFile={() => void projectFiles.handleOpenFromFile()}
           onOpenFromUrl={() => projectFiles.setProjectUrlDialogOpen(true)}
           onOpenGallery={() => setGalleryDialogOpen(true)}
+          onImportQgisProject={() => void projectFiles.handleImportQgisProject()}
+          onImportArcgisProject={() => void projectFiles.handleImportArcgisProject()}
           onOpenRecent={(path) => {
             void projectFiles.handleOpenRecent(path).then((error) => {
               if (error) projectFiles.setActionError(error);
             });
           }}
+          onOpenHistory={onOpenProjectHistory}
           onSave={() => void projectFiles.handleSave()}
           onSaveAs={() => void projectFiles.handleSaveAs()}
+          onDuplicate={() => projectFiles.handleDuplicate()}
+          onSaveAsTemplate={() => projectFiles.handleSaveAsTemplate()}
           onShare={() => setShareDialogOpen(true)}
           onExportHtml={() => void projectFiles.handleExportHtml()}
           onCollaborate={() => setCollaborateDialogOpen(true)}
@@ -1150,7 +1578,7 @@ export function TopToolbar({
           onOpenOfflineBasemap={onOpenBasemapExtract}
         />
       )}
-      {isMenuVisible(uiProfile, "edit") && (
+      {!viewer && isMenuVisible(uiProfile, "edit") && (
         <EditMenu chrome={chrome} mapControllerRef={mapControllerRef} />
       )}
       {isMenuVisible(uiProfile, "view") && (
@@ -1194,20 +1622,20 @@ export function TopToolbar({
         onSaveCurrentProject={projectFiles.handleSave}
         onProjectCreated={resetRuntimeControlsForNewProject}
       />
-      {isMenuVisible(uiProfile, "addData") && (
+      {!viewer && isMenuVisible(uiProfile, "addData") && (
         <AddDataMenu
           chrome={chrome}
           addLayer={addLayer}
           osmPbfBusy={osmPbf.busy}
-          onSetAddDataKind={setAddDataKind}
+          onSetAddDataKind={openAddDataKind}
           onAddGltfModel={() => {
             setAddDataDeckVizKind("scenegraph");
-            setAddDataKind("deckgl-viz");
+            openAddDataKind("deckgl-viz");
           }}
           onOpenOsmPbfDialog={() => osmPbf.setDialogOpen(true)}
         />
       )}
-      {isMenuVisible(uiProfile, "processing") && (
+      {!viewer && isMenuVisible(uiProfile, "processing") && (
         <ProcessingMenu
           chrome={chrome}
           earthEnginePanel={panels.earthEngine}
@@ -1219,6 +1647,7 @@ export function TopToolbar({
       {isMenuVisible(uiProfile, "controls") && (
         <ControlsMenu
           chrome={chrome}
+          viewer={viewer}
           controlsVisible={controlsVisible}
           panels={panels}
           effectsActive={isActive(EFFECTS_PLUGIN_ID)}
@@ -1243,7 +1672,7 @@ export function TopToolbar({
           onOpenRecordVideo={() => setRecordVideoOpen(true)}
         />
       )}
-      {isMenuVisible(uiProfile, "plugins") && (
+      {!viewer && isMenuVisible(uiProfile, "plugins") && (
         <PluginsMenu
           chrome={chrome}
           appApi={appApi}
@@ -1258,38 +1687,53 @@ export function TopToolbar({
       {/* Top-level toolbar menus registered by built-in plugins via
           app.registerToolbarMenu(); external plugin menus render after Help
           (below). Renders nothing when none exist. */}
-      <PluginToolbarMenus chrome={chrome} placement="builtin" />
-      <SettingsDialog
-        buttonClassName={toolbarButtonClass}
-        buttonSize={toolbarButtonSize}
-        iconClassName={toolbarIconClassName}
-        mapControllerRef={mapControllerRef}
-        showLabels={showLabels}
-        onOpenManagePlugins={() => setManagePluginsOpen(true)}
-        profilePlugins={profilePlugins}
-        themeMode={themeMode}
-        onToggleThemeMode={onToggleThemeMode}
-      />
-      <ManagePluginsDialog
-        open={managePluginsOpen}
-        onOpenChange={setManagePluginsOpen}
-        mapControllerRef={mapControllerRef}
-      />
+      {!viewer ? <PluginToolbarMenus chrome={chrome} placement="builtin" /> : null}
+      {!viewer ? (
+        <SettingsDialog
+          buttonClassName={toolbarButtonClass}
+          buttonSize={toolbarButtonSize}
+          iconClassName={toolbarIconClassName}
+          mapControllerRef={mapControllerRef}
+          showLabels={showLabels}
+          onOpenManagePlugins={() => setManagePluginsOpen(true)}
+          profilePlugins={profilePlugins}
+          themeMode={themeMode}
+          onToggleThemeMode={onToggleThemeMode}
+        />
+      ) : null}
+      {/* No plugin marketplace in the Mac App Store build (all its entry
+          points are hidden too; this keeps the install surface out of the
+          bundle). */}
+      {!IS_MAS_BUILD && (
+        <ManagePluginsDialog
+          open={managePluginsOpen}
+          onOpenChange={setManagePluginsOpen}
+          mapControllerRef={mapControllerRef}
+        />
+      )}
       <PrintLayoutDialog
         open={printLayoutOpen}
         onOpenChange={setPrintLayoutOpen}
         mapControllerRef={mapControllerRef}
       />
-      <FieldCollectionDialog
-        open={fieldCollectionOpen}
-        onOpenChange={setFieldCollectionOpen}
-        mapControllerRef={mapControllerRef}
-      />
-      <GpsTrackingDialog
-        open={gpsTrackingOpen}
-        onOpenChange={setGpsTrackingOpen}
-        mapControllerRef={mapControllerRef}
-      />
+      {/* Field Collection and GPS Tracking add features and layers to the
+          project, so they follow the Controls menu entries that open them out
+          of the read-only viewer preset. Record Tour and Record Video below
+          only read the map, so they stay. */}
+      {!viewer && (
+        <FieldCollectionDialog
+          open={fieldCollectionOpen}
+          onOpenChange={setFieldCollectionOpen}
+          mapControllerRef={mapControllerRef}
+        />
+      )}
+      {!viewer && (
+        <GpsTrackingDialog
+          open={gpsTrackingOpen}
+          onOpenChange={setGpsTrackingOpen}
+          mapControllerRef={mapControllerRef}
+        />
+      )}
       <RecordTourDialog
         open={recordTourOpen}
         onOpenChange={setRecordTourOpen}
@@ -1344,6 +1788,7 @@ export function TopToolbar({
       {isMenuVisible(uiProfile, "help") && (
         <HelpMenu
           chrome={chrome}
+          viewer={viewer}
           diagnosticsErrorCount={diagnosticsErrorCount}
           onOpenCommandPalette={() => setCommandPaletteOpen(true)}
           onOpenShortcuts={() => setShortcutsOpen(true)}
@@ -1357,7 +1802,7 @@ export function TopToolbar({
       )}
       {/* External plugin toolbar menus render after Help so third-party menus
           sit at the end of the banner, past the built-in menus. */}
-      <PluginToolbarMenus chrome={chrome} placement="external" />
+      {!viewer ? <PluginToolbarMenus chrome={chrome} placement="external" /> : null}
       <AddDataDialog
         kind={addDataKind}
         mapControllerRef={mapControllerRef}
@@ -1365,7 +1810,17 @@ export function TopToolbar({
         initialPostgres={addDataPostgres}
         onOpenChange={(open: boolean) => {
           if (!open) {
+            if (addDataTargetGroupId) {
+              const state = useAppStore.getState();
+              const addedIds = state.layers
+                .filter((layer) => !addDataInitialLayerIdsRef.current.has(layer.id))
+                .map((layer) => layer.id);
+              if (addedIds.length > 0) {
+                state.moveLayersToGroup(addedIds, addDataTargetGroupId);
+              }
+            }
             setAddDataKind(null);
+            setAddDataTargetGroupId(null);
             setAddDataDeckVizKind(undefined);
             setAddDataPostgres(undefined);
           }
@@ -1381,16 +1836,20 @@ export function TopToolbar({
         renderTrigger={false}
         onOpenChange={setAboutOpen}
       />
-      <CommandPalette
-        open={commandPaletteOpen}
-        commands={commands}
-        onOpenChange={setCommandPaletteOpen}
-      />
-      <KeyboardShortcutsDialog
-        open={shortcutsOpen}
-        commands={commands}
-        onOpenChange={setShortcutsOpen}
-      />
+      {!viewer && (
+        <CommandPalette
+          open={commandPaletteOpen}
+          commands={commands}
+          onOpenChange={setCommandPaletteOpen}
+        />
+      )}
+      {!viewer && (
+        <KeyboardShortcutsDialog
+          open={shortcutsOpen}
+          commands={commands}
+          onOpenChange={setShortcutsOpen}
+        />
+      )}
       <div className="ms-auto flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
         <Button
           aria-label={

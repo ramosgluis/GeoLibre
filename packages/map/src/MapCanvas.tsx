@@ -68,6 +68,29 @@ interface GeoLibreDuckDBBridge {
   setSelectedFeature?: (layerId: string, featureId: string | null) => void;
 }
 
+/** One band's value at an identified pixel, from the Time Slider bridge. */
+interface TimeSliderBandReading {
+  index: number;
+  name: string | null;
+  value: number;
+  isNodata: boolean;
+}
+
+interface TimeSliderPixelIdentifyBridgeResult {
+  sourceId: string;
+  date: string;
+  url: string;
+  bands: TimeSliderBandReading[];
+}
+
+interface GeoLibreTimeSliderBridge {
+  identifyPixelAt?: (
+    sourceId: string,
+    lngLat: [number, number],
+    options?: { signal?: AbortSignal },
+  ) => Promise<TimeSliderPixelIdentifyBridgeResult | null>;
+}
+
 function stringifyIdentifyValue(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "object") return JSON.stringify(value);
@@ -102,11 +125,19 @@ function createIdentifyPopupElement(
 
     const valueCell = document.createElement("div");
     valueCell.className = "break-words text-foreground";
-    // Render inline image data URLs (e.g. a geotagged-photo or field-collection
-    // thumbnail) as an actual thumbnail rather than a multi-kilobyte string.
-    // Match base64 raster images only, excluding SVG (which can carry scripts)
-    // so an untrusted GeoJSON value can't smuggle one in.
-    if (typeof value === "string" && /^data:image\/(?!svg)[\w.+-]+;base64,/i.test(value)) {
+    // Render known KML description structures as sanitized markup. Requiring a
+    // supported tag keeps ordinary text such as "Elevation <500m>" intact.
+    if (
+      key === "description" &&
+      typeof value === "string" &&
+      /<(?:a|b|br|div|em|i|p|span|strong|table|tbody|td|th|thead|tr)\b/i.test(value)
+    ) {
+      appendSanitizedKmlDescription(valueCell, value);
+      // Render inline image data URLs (e.g. a geotagged-photo or field-collection
+      // thumbnail) as an actual thumbnail rather than a multi-kilobyte string.
+      // Match base64 raster images only, excluding SVG (which can carry scripts)
+      // so an untrusted GeoJSON value can't smuggle one in.
+    } else if (typeof value === "string" && /^data:image\/(?!svg)[\w.+-]+;base64,/i.test(value)) {
       const image = document.createElement("img");
       image.src = value;
       image.alt = key;
@@ -128,7 +159,9 @@ function createIdentifyPopupElement(
   // show a second copy of the same photo in the same small box. Filter before
   // the empty-state check so a feature whose only property is `photo_full` still
   // reports "No attributes" rather than rendering an empty panel.
-  const entries = Object.entries(properties).filter(([key]) => key !== PHOTO_FULL_KEY);
+  const entries = Object.entries(properties).filter(
+    ([key]) => key !== PHOTO_FULL_KEY && !key.startsWith("__geolibre_"),
+  );
   if (entries.length === 0 && featureId == null) {
     const empty = document.createElement("div");
     empty.className = "text-muted-foreground";
@@ -139,6 +172,57 @@ function createIdentifyPopupElement(
   }
 
   return root;
+}
+
+const KML_DESCRIPTION_TAGS = new Set([
+  "a",
+  "b",
+  "br",
+  "div",
+  "em",
+  "i",
+  "p",
+  "span",
+  "strong",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+]);
+
+/** Render useful KML description markup while dropping scripts and attributes. */
+function appendSanitizedKmlDescription(target: HTMLElement, html: string): void {
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  const copy = (node: Node, parent: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      parent.appendChild(document.createTextNode(node.textContent ?? ""));
+      return;
+    }
+    if (!(node instanceof Element)) return;
+    const tag = node.localName.toLowerCase();
+    if (tag === "script" || tag === "style" || tag === "head" || tag === "meta") return;
+    if (!KML_DESCRIPTION_TAGS.has(tag)) {
+      for (const child of node.childNodes) copy(child, parent);
+      return;
+    }
+    const element = document.createElement(tag);
+    if (tag === "a") {
+      const href = node.getAttribute("href")?.trim();
+      if (href && /^(https?:|mailto:)/i.test(href)) {
+        element.setAttribute("href", href);
+        element.setAttribute("target", "_blank");
+        element.setAttribute("rel", "noopener noreferrer");
+      }
+    }
+    for (const child of node.childNodes) copy(child, element);
+    parent.appendChild(element);
+  };
+  const content = document.createElement("div");
+  content.className = "geolibre-kml-description";
+  for (const child of parsed.body.childNodes) copy(child, content);
+  target.appendChild(content);
 }
 
 function createIdentifyMessagePopupElement(layerName: string, message: string): HTMLElement {
@@ -503,6 +587,7 @@ function identifyStyleLayerIds(layer: GeoLibreLayer): string[] {
     ...nativeIdentifyLayerIds(layer),
     ...nativeIdentifyLayerIds(layer).map(externalExtrusionLayerId),
     ...mbtilesStyleLayerIds(layer),
+    markerLayerId(layer.id),
     circleLayerId(layer.id),
     lineLayerId(layer.id),
     fillExtrusionLayerId(layer.id),
@@ -547,6 +632,50 @@ function duckDBBridge(): GeoLibreDuckDBBridge | undefined {
   return typeof window === "undefined"
     ? undefined
     : (window as Window & { __GEOLIBRE_DUCKDB__?: GeoLibreDuckDBBridge }).__GEOLIBRE_DUCKDB__;
+}
+
+function timeSliderBridge(): GeoLibreTimeSliderBridge | undefined {
+  return typeof window === "undefined"
+    ? undefined
+    : (window as Window & { __GEOLIBRE_TIME_SLIDER__?: GeoLibreTimeSliderBridge })
+        .__GEOLIBRE_TIME_SLIDER__;
+}
+
+/**
+ * Whether Identify should read source pixel values for this layer rather than
+ * query vector features. Set by the Time Slider for its COG/mosaic sources,
+ * which resolve to a different file per timeline date.
+ */
+function isPixelIdentifyLayer(layer: GeoLibreLayer): boolean {
+  return layer.metadata.pixelIdentify === true;
+}
+
+/**
+ * Trim a float sample to something readable. A 32-bit raster value decoded to a
+ * JS double prints all 17 digits of its binary representation
+ * (`48.11851119995117`), which is noise past the sensor's precision — six
+ * significant digits is more than any COG carries. Integers are left alone so a
+ * classification code is never shown in exponential form.
+ */
+function formatPixelValue(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  if (Number.isInteger(value)) return String(value);
+  return String(Number(value.toPrecision(6)));
+}
+
+/** Turn a pixel reading into the flat key/value rows the identify popup shows. */
+function pixelIdentifyProperties(
+  result: TimeSliderPixelIdentifyBridgeResult,
+): Record<string, unknown> {
+  const properties: Record<string, unknown> = { Date: result.date };
+  for (const band of result.bands) {
+    // Prefer the COG's own band name, falling back to the 1-based index so
+    // unnamed bands still get a stable, distinct row label.
+    const key = band.name ?? `Band ${band.index}`;
+    const formatted = formatPixelValue(band.value);
+    properties[key] = band.isNodata ? `${formatted} (nodata)` : formatted;
+  }
+  return properties;
 }
 
 function stringSource(value: unknown): string | undefined {
@@ -947,7 +1076,7 @@ export const MapCanvas = memo(function MapCanvas({
       onMapDiagnosticEventRef.current?.(mapErrorDiagnosticEvent(event));
     });
 
-    const updateView = (event?: { originalEvent?: unknown }) => {
+    const updateView = (event?: { originalEvent?: unknown; flightCameraToken?: number }) => {
       // While presenting a story map the presenter owns the camera. Syncing its
       // transient chapter flies and rotations back into the store would both
       // overwrite the saved project view and, worse, re-enter the applyView
@@ -955,6 +1084,10 @@ export const MapCanvas = memo(function MapCanvas({
       // the rotate handler starts orbiting the previous chapter instead of the
       // one just clicked. Skipping the sync keeps the presenter authoritative.
       if (useAppStore.getState().ui.storymapPresenting) return;
+      // The flight simulator likewise owns the camera while it flies, and jumps
+      // it every animation frame. Writing each of those into the store would
+      // overwrite the project's saved view ~60 times a second.
+      if (event?.flightCameraToken !== undefined) return;
       setMapView(mc.readView(), Boolean(event?.originalEvent));
     };
     map.on("moveend", updateView);
@@ -981,7 +1114,6 @@ export const MapCanvas = memo(function MapCanvas({
     map.on("projectiontransition", updateProjection);
     map.on("load", () => {
       const state = useAppStore.getState();
-      mc.waitAndSyncLayers(applyGroupEffects(state.layers, state.layerGroups));
       mc.setBasemapVisible(state.basemapVisible);
       mc.setBasemapOpacity(state.basemapOpacity);
       mc.highlightFeature(
@@ -1053,7 +1185,6 @@ export const MapCanvas = memo(function MapCanvas({
     prevBasemap.current = basemapStyleUrl;
     map.once("style.load", () => {
       const state = useAppStore.getState();
-      controller.current?.waitAndSyncLayers(applyGroupEffects(state.layers, state.layerGroups));
       controller.current?.setBasemapVisible(state.basemapVisible);
       controller.current?.setBasemapOpacity(state.basemapOpacity);
       controller.current?.highlightFeature(
@@ -1154,6 +1285,7 @@ export const MapCanvas = memo(function MapCanvas({
     map.getCanvas().style.cursor = "crosshair";
 
     let wmsIdentifyAbortController: AbortController | null = null;
+    let pixelIdentifyAbortController: AbortController | null = null;
 
     const handleIdentifyClick = (event: maplibregl.MapMouseEvent) => {
       const clearIdentifyResult = () => {
@@ -1175,6 +1307,58 @@ export const MapCanvas = memo(function MapCanvas({
           .setDOMContent(content)
           .addTo(map);
       };
+
+      if (isPixelIdentifyLayer(layer)) {
+        const identifyPixelAt = timeSliderBridge()?.identifyPixelAt;
+        if (!identifyPixelAt) {
+          clearIdentifyResult();
+          return;
+        }
+        pixelIdentifyAbortController?.abort();
+        const abortController = new AbortController();
+        pixelIdentifyAbortController = abortController;
+        selectFeature(null);
+        showIdentifyPopup(createIdentifyMessagePopupElement(layer.name, "Loading..."));
+        // Same dismissal dance as the WMS branch: the × on the loading popup
+        // must cancel the read, but the programmatic swap to the result popup
+        // also fires "close", so track user dismissal with a flag rather than
+        // treating every close as a cancel.
+        let userDismissed = false;
+        const loadingPopup = identifyPopup.current;
+        const onLoadingClose = () => {
+          userDismissed = true;
+          abortController.abort();
+          if (pixelIdentifyAbortController === abortController) {
+            pixelIdentifyAbortController = null;
+          }
+        };
+        loadingPopup!.once("close", onLoadingClose);
+
+        void identifyPixelAt(layer.id, [event.lngLat.lng, event.lngLat.lat], {
+          signal: abortController.signal,
+        })
+          .then((result) => {
+            if (userDismissed || abortController.signal.aborted) return;
+            pixelIdentifyAbortController = null;
+            loadingPopup?.off("close", onLoadingClose);
+            // A null result means the click landed off the image grid, which is
+            // an ordinary miss rather than a failure.
+            showIdentifyPopup(
+              result
+                ? createIdentifyPopupElement(layer.name, pixelIdentifyProperties(result))
+                : createIdentifyMessagePopupElement(layer.name, "No data at this location."),
+            );
+          })
+          .catch((error: unknown) => {
+            if (userDismissed || isAbortError(error) || abortController.signal.aborted) return;
+            pixelIdentifyAbortController = null;
+            loadingPopup?.off("close", onLoadingClose);
+            const message =
+              error instanceof Error ? error.message : "The pixel value could not be read.";
+            showIdentifyPopup(createIdentifyMessagePopupElement(layer.name, message));
+          });
+        return;
+      }
 
       if (isWmsLayer(layer)) {
         wmsIdentifyAbortController?.abort();
@@ -1265,6 +1449,7 @@ export const MapCanvas = memo(function MapCanvas({
 
     return () => {
       wmsIdentifyAbortController?.abort();
+      pixelIdentifyAbortController?.abort();
       map.off("click", handleIdentifyClick);
       identifyPopup.current?.remove();
       identifyPopup.current = null;

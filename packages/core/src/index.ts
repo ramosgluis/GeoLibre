@@ -9,6 +9,7 @@ export * from "./paths";
 export * from "./routing";
 export * from "./vector-color";
 export * from "./expressions";
+export * from "./external-native-paint";
 export * from "./attribute-form";
 export * from "./joins";
 export * from "./virtual-fields";
@@ -16,9 +17,16 @@ export * from "./selection";
 export * from "./scale-units";
 export * from "./project";
 export * from "./style-library";
+export * from "./layer-library";
+export * from "./layer-defaults";
 export * from "./layer-style-clipboard";
 export * from "./layer-groups";
 export { createSampleStoryMap } from "./storymap-sample";
+export {
+  scrubWidgetsForRemovedLayers,
+  scrubCommentsForRemovedLayers,
+  scrubLegendForRemovedLayers,
+} from "./layer-ref-scrub";
 export {
   serializeStoryMapJson,
   parseStoryMapJson,
@@ -27,8 +35,12 @@ export {
 } from "./storymap-io";
 export {
   clearHistory,
+  canRedoProjectRestore,
+  canUndoProjectRestore,
   DEFAULT_COLLABORATION_STATE,
   projectPathLabel,
+  registerProjectRestoreHistory,
+  subscribeProjectRestoreHistory,
   redo,
   undo,
   useAppStore,
@@ -57,6 +69,8 @@ export {
   GEOCODE_LON_KEY,
   GEOCODE_DISPLAY_NAME_KEY,
   GEOCODE_SCORE_KEY,
+  GEOCODE_PROVIDER_KEY,
+  GEOCODE_STATUS_KEY,
   DEFAULT_GEOCODING_PROVIDER_ID,
   GEOCODING_PROVIDERS,
   getGeocoderConfig,
@@ -71,6 +85,7 @@ export {
   buildForwardGeocodeUrl,
   buildReverseGeocodeUrl,
   geocodeMatchToFeature,
+  unmatchedGeocodeFeature,
   nominatimResultToFeature,
   nominatimReverseResultToDisplay,
   csvRowsToGeocodeRequests,
@@ -82,6 +97,7 @@ export {
   type GeocodingProviderId,
   type GeocodingPreferenceInput,
   type GeocodeMatch,
+  type GeocodeStatus,
   type NominatimForwardResult,
   type NominatimReverseResult,
   type GeocodeRequest,
@@ -90,11 +106,13 @@ export {
 export {
   getCesiumIonToken,
   getGoogleMapsApiKey,
+  getMapboxAccessToken,
   getProtomapsApiKey,
   getProtomapsStyleUrl,
   getRuntimeEnvironment,
   getSpatialExtensionPath,
 } from "./runtime-env";
+export { isIpadDesktopUserAgent } from "./platform";
 export {
   GOOGLE_MAPS_API_KEY_HEADER,
   googleMapsApiKeyHeaderValue,

@@ -90,6 +90,12 @@ export const DATA_SOURCE_CATALOG: readonly DataSourceCatalogEntry[] = [
   { id: "wfs", section: "webServices", labelKey: "toolbar.layerType.wfs", tier: "intermediate" },
   { id: "wmts", section: "webServices", labelKey: "toolbar.layerType.wmts", tier: "intermediate" },
   {
+    id: "ogc-features",
+    section: "webServices",
+    labelKey: "toolbar.layerType.ogcFeatures",
+    tier: "intermediate",
+  },
+  {
     id: "ogc-vector-tiles",
     section: "webServices",
     labelKey: "toolbar.layerType.ogcVectorTiles",
@@ -176,7 +182,9 @@ export const PLUGIN_TIERS: Record<string, ComplexityTier> = {
   "maplibre-gl-nasa-earthdata": "advanced",
   "maplibre-gl-enviroatlas": "advanced",
   "maplibre-gl-national-map": "advanced",
+  "maplibre-gl-arcgis-hub": "advanced",
   "maplibre-gl-source-coop": "advanced",
+  "maplibre-gl-huggingface": "advanced",
   "maplibre-gl-esri-wayback": "advanced",
   "maplibre-gl-geoagent": "advanced",
   "maplibre-gl-usgs-lidar": "advanced",
@@ -249,12 +257,36 @@ export const MENU_ITEM_CATALOG: readonly MenuItemCatalogEntry[] = [
     labelKey: "toolbar.item.openRecent",
     tier: "basic",
   },
+  {
+    id: "project.history",
+    menuId: "project",
+    labelKey: "toolbar.item.projectHistoryEllipsis",
+    tier: "basic",
+  },
+  {
+    id: "project.import",
+    menuId: "project",
+    labelKey: "toolbar.menu.import",
+    tier: "basic",
+  },
   { id: "project.save", menuId: "project", labelKey: "common.save", tier: "basic" },
   {
     id: "project.saveAs",
     menuId: "project",
     labelKey: "toolbar.item.saveAsEllipsis",
     tier: "basic",
+  },
+  {
+    id: "project.duplicate",
+    menuId: "project",
+    labelKey: "toolbar.item.duplicate",
+    tier: "basic",
+  },
+  {
+    id: "project.saveAsTemplate",
+    menuId: "project",
+    labelKey: "toolbar.item.saveAsTemplateEllipsis",
+    tier: "intermediate",
   },
   {
     id: "project.share",
@@ -570,6 +602,12 @@ export const MENU_ITEM_CATALOG: readonly MenuItemCatalogEntry[] = [
     id: "controls.routeAnimation",
     menuId: "controls",
     labelKey: "toolbar.item.routeAnimation",
+    tier: "intermediate",
+  },
+  {
+    id: "controls.flightSimulator",
+    menuId: "controls",
+    labelKey: "toolbar.item.flightSimulator",
     tier: "intermediate",
   },
   {
